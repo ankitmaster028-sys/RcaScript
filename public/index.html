@@ -37,7 +37,6 @@
             overflow-x: hidden;
         }
 
-        /* Animated Background */
         .bg-animation {
             position: fixed;
             top: 0;
@@ -89,7 +88,6 @@
             66% { transform: translate(-20px, 20px) scale(0.9); }
         }
 
-        /* Login Screen */
         .login-container {
             display: flex;
             justify-content: center;
@@ -249,7 +247,6 @@
             75% { transform: translateX(10px); }
         }
 
-        /* Dashboard */
         .dashboard {
             display: none;
             min-height: 100vh;
@@ -443,7 +440,6 @@
             box-shadow: 0 12px 35px rgba(239, 68, 68, 0.4);
         }
 
-        /* Stats Cards */
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -493,7 +489,6 @@
             font-weight: 700;
         }
 
-        /* Levels Section */
         .levels-section {
             margin-bottom: 30px;
         }
@@ -648,7 +643,6 @@
             font-size: 14px;
         }
 
-        /* Progress Overlay */
         .progress-overlay {
             position: fixed;
             top: 0;
@@ -764,7 +758,6 @@
             color: var(--info);
         }
 
-        /* Modal */
         .modal-overlay {
             position: fixed;
             top: 0;
@@ -828,7 +821,6 @@
             background: rgba(255,255,255,0.15);
         }
 
-        /* Toast */
         .toast-container {
             position: fixed;
             top: 20px;
@@ -896,7 +888,6 @@
             color: var(--gray);
         }
 
-        /* Responsive */
         @media (max-width: 1200px) {
             .stats-grid { grid-template-columns: repeat(2, 1fr); }
             .skills-grid { grid-template-columns: repeat(2, 1fr); }
@@ -914,12 +905,10 @@
             .level-actions { flex-direction: column; }
         }
 
-        /* Scrollbar */
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: var(--primary); border-radius: 3px; }
 
-        /* Animations */
         .fade-in {
             animation: fadeIn 0.5s ease;
         }
@@ -931,17 +920,14 @@
     </style>
 </head>
 <body>
-    <!-- Background Animation -->
     <div class="bg-animation">
         <div class="circle"></div>
         <div class="circle"></div>
         <div class="circle"></div>
     </div>
 
-    <!-- Toast Container -->
     <div class="toast-container" id="toastContainer"></div>
 
-    <!-- Login Screen -->
     <div class="login-container" id="loginScreen">
         <div class="login-box">
             <div class="logo">
@@ -969,7 +955,6 @@
         </div>
     </div>
 
-    <!-- Dashboard -->
     <div class="dashboard" id="dashboard">
         <div class="sidebar">
             <div class="sidebar-header">
@@ -1014,7 +999,6 @@
                 </div>
             </div>
 
-            <!-- Stats Grid -->
             <div class="stats-grid">
                 <div class="stat-card">
                     <div class="icon purple"><i class="fas fa-layer-group"></i></div>
@@ -1038,14 +1022,11 @@
                 </div>
             </div>
 
-            <!-- Levels Section -->
             <div class="levels-section" id="levelsContainer">
-                <!-- Levels will be dynamically inserted here -->
             </div>
         </div>
     </div>
 
-    <!-- Progress Overlay -->
     <div class="progress-overlay" id="progressOverlay">
         <div class="progress-box">
             <div class="progress-icon">
@@ -1064,7 +1045,6 @@
         </div>
     </div>
 
-    <!-- Add Coin Modal -->
     <div class="modal-overlay" id="coinModal">
         <div class="modal-box">
             <h3><i class="fas fa-coins" style="color: var(--warning);"></i> Add Coins</h3>
@@ -1089,7 +1069,6 @@
     </div>
 
     <script>
-        // ==================== CONFIGURATION ====================
         const CONFIG = {
             PASSKEY: "MyselfAnkit",
             PASSWORD: "Password",
@@ -1101,7 +1080,6 @@
             DELAY_BETWEEN_TASKS: 2000
         };
 
-        // API standardLevelId mapping from HAR: A1=4, A2=5, B1=6, B2=7, C1=8, C2=9
         const LEVELS = [
             { id: 4, name: "A1", title: "Beginner", subtitle: "Foundation Level", color: "a1" },
             { id: 5, name: "A2", title: "Elementary", subtitle: "Basic Communication", color: "a2" },
@@ -1207,7 +1185,6 @@
             return data;
         }
 
-        // ==================== LOGIN ====================
         async function handleLogin() {
             const loginId = document.getElementById("userId").value.trim();
             const password = document.getElementById("password").value;
@@ -1286,8 +1263,7 @@
                 console.error(error);
                 let msg = error.message || "Please try again";
                 if (String(msg).indexOf("Failed to fetch") !== -1 || error.name === "TypeError") {
-                    msg =
-                        "Network/CORS blocked. Open this page via a local server, or use a CORS extension, or inject on rca.englishhelper.com";
+                    msg = "Network error. Please check your connection and try again.";
                 }
                 errorEl.textContent = "Login failed: " + msg;
                 errorEl.classList.add("show");
@@ -1315,7 +1291,6 @@
             showToast("Logged Out", "You have been successfully logged out", "info");
         }
 
-        // ==================== LOAD LEVELS ====================
         async function loadAllLevelsData() {
             for (let i = 0; i < LEVELS.length; i++) {
                 const level = LEVELS[i];
@@ -1397,7 +1372,6 @@
             };
         }
 
-        // ==================== RENDER ====================
         function renderLevels() {
             const container = document.getElementById("levelsContainer");
             container.innerHTML = "";
@@ -1503,7 +1477,6 @@
             document.getElementById("totalTasks").textContent = totalTasks;
         }
 
-        // ==================== ANSWER HELPERS ====================
         function pickCorrectAnswer(q) {
             const opts = q.activityAnswerDTO || [];
             const correct = opts.find(function (o) {
@@ -1661,7 +1634,6 @@
             return true;
         }
 
-        // ==================== COMPLETE LEVEL / ALL ====================
         async function completeLevelTasks(levelId) {
             if (isProcessing) {
                 showToast("Warning", "A task is already running!", "warning");
@@ -1828,7 +1800,6 @@
             }
         }
 
-        // ==================== PROGRESS UI ====================
         function showProgressOverlay(title) {
             document.getElementById("progressTitle").textContent = title;
             document.getElementById("progressOverlay").classList.add("active");
@@ -1857,7 +1828,6 @@
             log.scrollTop = log.scrollHeight;
         }
 
-        // ==================== COINS ====================
         function showAddCoinModal() {
             coinModalStep = 1;
             document.getElementById("passkeyGroup").style.display = "block";
@@ -1948,7 +1918,6 @@
             }
         }
 
-        // ==================== EVENTS ====================
         document.getElementById("userId").addEventListener("keypress", function (e) {
             if (e.key === "Enter") handleLogin();
         });
