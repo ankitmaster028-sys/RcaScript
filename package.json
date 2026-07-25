@@ -1,8 +1,14 @@
 {
-  "name": "ielts-dashboard",
-  "version": "1.0.0",
-  "description": "IELTS Dashboard with API Proxy for Vercel",
+  "name": "rca-ielts-dashboard",
+  "version": "2.0.0",
+  "description": "Secure IELTS dashboard – RCA logic on Node backend",
+  "main": "server.js",
   "scripts": {
-    "dev": "vercel dev"
-  }
+    "start": "node server.js",
+    "server": "node server.js"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "private": true
 }
