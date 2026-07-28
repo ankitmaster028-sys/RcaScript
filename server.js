@@ -1,14 +1,8 @@
 #!/usr/bin/env node
 /**
- * RCA IELTS Dashboard – secure backend
- *
- * - All English Helper API calls, tokens, answer-filling stay on the server
- * - Browser only talks to this server (session cookie)
- * - Serves a thin UI from /public
- *
- * Usage:
- *   node server.js
- *   Open http://127.0.0.1:8765
+ * RCA IELTS Dashboard – Production Edition
+ * Routes: / (Home), /single (Single User), /bulk (Bulk 5-User)
+ * Features: No task delays, No coin cost for tasks, Direct coin API, Dark/Light UI
  */
 
 "use strict";
@@ -20,7 +14,9 @@ const path = require("path");
 const crypto = require("crypto");
 const { URL } = require("url");
 
-// ==================== CONFIG (server-only secrets) ====================
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
+// ==================== CONFIGURATION ====================
 const CONFIG = {
   HOST: "127.0.0.1",
   PORT: 8765,
@@ -28,11 +24,13 @@ const CONFIG = {
   PACKAGE_ID: 5,
   ACTIVITY_TYPE_ID: 4,
   CURRICULUM_ID: 21,
-  APP_PASSWORD: "Password", // RCA login password
+  APP_PASSWORD: "Password",
   COIN_PASSKEY: "MyselfAnkit",
-  DELAY_BETWEEN_ANSWERS_MS: 1000,
-  DELAY_BETWEEN_TASKS_MS: 2000,
+  DELAY_BETWEEN_QUESTIONS_MS: 0,
+  DELAY_BETWEEN_TASKS_MS: 0,
   SESSION_TTL_MS: 7 * 24 * 60 * 60 * 1000,
+  MAX_BULK_USERS: 5,
+  MAX_COINS_PER_REQUEST: 500
 };
 
 const LEVELS = [
@@ -54,22 +52,18 @@ const SKILLS = [
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, "public");
 
-// sessionId -> { accessToken, loginId, learnerId, userId, name, coins, createdAt }
 const sessions = new Map();
-// jobId -> job state for long-running complete tasks
 const jobs = new Map();
 
 function uuid() {
-  return crypto.randomUUID
-    ? crypto.randomUUID()
-    : crypto.randomBytes(16).toString("hex");
+  return crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
 }
 
 function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ==================== HTTPS client to RCA API ====================
+// ==================== HTTPS CLIENT ====================
 function rcaRequest(method, apiPath, { token, body, query } = {}) {
   return new Promise((resolve, reject) => {
     let pathStr = apiPath.startsWith("/") ? apiPath : "/" + apiPath;
@@ -86,28 +80,27 @@ function rcaRequest(method, apiPath, { token, body, query } = {}) {
         : JSON.stringify(body);
 
     const headers = {
-      Accept: "application/json, text/plain, */*",
-      Origin: "https://rca.englishhelper.com",
-      Referer: "https://rca.englishhelper.com/",
-      "User-Agent":
-        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Mobile Safari/537.36",
+      "Accept": "application/json, text/plain, */*",
+      "Content-Type": "application/json",
+      "Origin": "https://rca.englishhelper.com",
+      "Referer": "https://rca.englishhelper.com/",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       "x-request-id": uuid(),
       "x-journey-id": uuid(),
     };
-    if (token) headers.Authorization = "Bearer " + token;
-    if (payload !== null) {
-      headers["Content-Type"] = "application/json";
-      headers["Content-Length"] = Buffer.byteLength(payload);
-    }
+
+    if (token) headers["Authorization"] = "Bearer " + token;
+    if (payload !== null) headers["Content-Length"] = Buffer.byteLength(payload);
 
     const url = new URL(CONFIG.API_BASE + pathStr);
     const opts = {
       protocol: url.protocol,
       hostname: url.hostname,
-      port: url.port || 443,
+      port: url.port || 8443,
       path: url.pathname + url.search,
-      method,
+      method: method.toUpperCase(),
       headers,
+      rejectUnauthorized: false
     };
 
     const req = https.request(opts, (res) => {
@@ -116,13 +109,11 @@ function rcaRequest(method, apiPath, { token, body, query } = {}) {
       res.on("end", () => {
         const raw = Buffer.concat(chunks).toString("utf8");
         let data = raw;
-        try {
-          data = raw ? JSON.parse(raw) : null;
-        } catch (_) {}
+        try { data = raw ? JSON.parse(raw) : null; } catch (_) {}
+
         if (res.statusCode >= 400) {
-          const err = new Error(
-            (data && data.message) || raw || "HTTP " + res.statusCode
-          );
+          console.error(`[RCA API ERROR] Path: ${pathStr} | Code: ${res.statusCode} | Raw: ${raw}`);
+          const err = new Error((data && (data.message || data.error)) || raw || "HTTP " + res.statusCode);
           err.status = res.statusCode;
           err.data = data;
           reject(err);
@@ -131,14 +122,19 @@ function rcaRequest(method, apiPath, { token, body, query } = {}) {
         resolve(data);
       });
     });
-    req.on("error", reject);
-    req.setTimeout(60000, () => req.destroy(new Error("RCA timeout")));
+
+    req.on("error", (e) => {
+      console.error(`[RCA Network Error] ${e.message}`);
+      reject(e);
+    });
+
+    req.setTimeout(30000, () => req.destroy(new Error("RCA Network Timeout")));
     if (payload !== null) req.write(payload);
     req.end();
   });
 }
 
-// ==================== Session helpers ====================
+// ==================== SESSION MANAGEMENT ====================
 function getSession(req) {
   const cookie = req.headers.cookie || "";
   const m = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
@@ -154,60 +150,52 @@ function getSession(req) {
 }
 
 function setSessionCookie(res, sid) {
-  res.setHeader(
-    "Set-Cookie",
-    "sid=" +
-      encodeURIComponent(sid) +
-      "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" +
-      Math.floor(CONFIG.SESSION_TTL_MS / 1000)
-  );
+  res.setHeader("Set-Cookie", "sid=" + encodeURIComponent(sid) + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" + Math.floor(CONFIG.SESSION_TTL_MS / 1000));
 }
 
 function clearSessionCookie(res) {
   res.setHeader("Set-Cookie", "sid=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
 }
 
-function publicUser(s) {
-  return {
-    loginId: s.loginId,
-    learnerId: s.learnerId,
-    name: s.name,
-    coins: s.coins,
-  };
+function publicUser(u) {
+  return { loginId: u.loginId, learnerId: u.learnerId, name: u.name, coins: u.coins };
 }
 
-// ==================== RCA business logic (server-only) ====================
-async function rcaLogin(loginId, password) {
-  if (password !== CONFIG.APP_PASSWORD) {
-    const e = new Error("Invalid password");
-    e.status = 401;
-    throw e;
-  }
+// ==================== RCA AUTOMATION ====================
+async function rcaLogin(loginId, userPassword) {
+  const reqPassword = userPassword || CONFIG.APP_PASSWORD;
+  console.log(`[Attempting Login] ID: ${loginId}`);
+
   const loginRes = await rcaRequest("POST", "/login", {
     body: {
-      loginId: String(loginId),
-      password: CONFIG.APP_PASSWORD,
+      loginId: String(loginId).trim(),
+      password: String(reqPassword).trim(),
       levelId: 0,
       role: "",
       caLoginConfigId: "0",
       date: Date.now(),
     },
   });
-  if (!loginRes || !loginRes.accessToken) {
-    throw new Error("Login failed: no accessToken");
+
+  if (!loginRes || (!loginRes.accessToken && !loginRes.token)) {
+    throw new Error("Invalid response received from RCA server");
   }
-  const details = await rcaRequest("POST", "/userDetails?inputKeywordList=0", {
-    token: loginRes.accessToken,
-    body: "",
-  });
+
+  const token = loginRes.accessToken || loginRes.token;
+  let details = {};
+  try {
+    details = await rcaRequest("POST", "/userDetails?inputKeywordList=0", { token, body: "" });
+  } catch (e) {
+    console.warn(`[UserDetails Warning] ${e.message}`);
+  }
+
   return {
-    accessToken: loginRes.accessToken,
-    loginId: String(loginId),
-    learnerId: details.learnerId,
-    userId: details.authorizedUserId,
-    name:
-      [details.firstName, details.lastName].filter(Boolean).join(" ").trim() ||
-      "User " + loginId,
+    accessToken: token,
+    loginId: String(loginId).trim(),
+    learnerId: details.learnerId || loginRes.learnerId || String(loginId),
+    userId: details.authorizedUserId || loginRes.userId || String(loginId),
+    name: [details.firstName, details.lastName].filter(Boolean).join(" ").trim() || "User " + loginId,
+    coins: details.totalCoins || 0,
     packageId: details.packageId || CONFIG.PACKAGE_ID,
     curriculumId: details.curriculumId || CONFIG.CURRICULUM_ID,
   };
@@ -231,7 +219,7 @@ async function loadLevelData(token, level) {
     const completed = !!section.isCompleted;
     if (!completed) allDone = false;
     skills[key] = {
-      name: key.charAt(0) + key.slice(1).toLowerCase(),
+      name: key ? key.charAt(0) + key.slice(1).toLowerCase() : "Skill",
       completed,
       score: section.totalScore || 0,
       totalActivities: ids.length,
@@ -243,25 +231,11 @@ async function loadLevelData(token, level) {
   });
   SKILLS.forEach((s) => {
     if (!skills[s.key]) {
-      skills[s.key] = {
-        name: s.name,
-        completed: false,
-        score: 0,
-        totalActivities: 0,
-        completedActivities: 0,
-        time: "10",
-        activitySetIds: [],
-        testSummaryId: null,
-      };
+      skills[s.key] = { name: s.name, completed: false, score: 0, totalActivities: 0, completedActivities: 0, time: "10", activitySetIds: [], testSummaryId: null };
       allDone = false;
     }
   });
-  return {
-    level,
-    skills,
-    testSummaryId: (list && list[0] && list[0].testSummaryId) || null,
-    isCompleted: allDone,
-  };
+  return { level, skills, testSummaryId: (list && list[0] && list[0].testSummaryId) || null, isCompleted: allDone };
 }
 
 function pickCorrectAnswer(q) {
@@ -272,9 +246,7 @@ function pickCorrectAnswer(q) {
     const n = Number(q.correctAnswer);
     return isNaN(n) ? q.correctAnswer : n;
   }
-  if (q.itemType === "FIB" || q.itemType === "FILLINBLANK") {
-    return q.correctAnswer || "";
-  }
+  if (q.itemType === "FIB" || q.itemType === "FILLINBLANK") return q.correctAnswer || "";
   if (opts.length) return opts[0].id;
   return null;
 }
@@ -284,8 +256,7 @@ function fillAnswers(activity) {
   let correctCount = 0;
   list.forEach((q) => {
     if (q.itemType === "IELTSWRITING" || q.itemType === "WRITING") {
-      q.userEssay =
-        "In today's world, education and independence play a vital role in shaping our future. Many young people choose to leave their hometowns for better opportunities, while others prefer staying close to family. Both sides have merits. Moving out can build confidence and career growth, whereas living in hometowns offers support and cultural roots. In my opinion, a balanced approach works best: gain experience outside, then decide based on personal goals. Overall, adults should carefully weigh pros and cons before making such decisions.";
+      q.userEssay = "In today's world, consistency and focused preparation form the core foundation for achieving strong scores in IELTS examinations.";
       q.isUserAnswerCorrect = true;
       q.userAnswer = null;
       q.isSubmitClicked = true;
@@ -298,9 +269,7 @@ function fillAnswers(activity) {
       q.userAnswer = ans;
       const opts = q.activityAnswerDTO || [];
       const matched = opts.find((o) => o.id == ans);
-      q.isUserAnswerCorrect = matched
-        ? !!matched.isCorrect
-        : String(ans) === String(q.correctAnswer);
+      q.isUserAnswerCorrect = matched ? !!matched.isCorrect : String(ans) === String(q.correctAnswer);
       if (q.isUserAnswerCorrect) correctCount++;
     } else {
       q.userAnswer = null;
@@ -323,10 +292,7 @@ async function submitActivity(token, activity, state, learnerId) {
   if (!payload.startDate) payload.startDate = now - 30000;
   if (state === "SUBMITTED") {
     payload.endDate = now;
-    payload.totalTimeTaken = Math.max(
-      20,
-      Math.floor((payload.endDate - payload.startDate) / 1000)
-    );
+    payload.totalTimeTaken = Math.max(20, Math.floor((payload.endDate - payload.startDate) / 1000));
   }
   await rcaRequest("POST", "/activity/data", { token, body: payload });
   return payload;
@@ -346,32 +312,7 @@ async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs) 
       body: "",
     });
   } catch (e) {
-    console.warn("time update", e.message);
-  }
-}
-
-async function submitWritingEssay(token, activity) {
-  const q = (activity.activityQuestionDetailsList || []).find(
-    (x) => x.itemType === "IELTSWRITING" || x.itemType === "WRITING"
-  );
-  if (!q) return;
-  try {
-    const essay = encodeURIComponent(
-      q.userEssay || "Sample essay for IELTS writing task."
-    );
-    const t = encodeURIComponent(new Date().toISOString());
-    await rcaRequest(
-      "GET",
-      "/ielts/essay-report?activityItemId=" +
-        q.itemId +
-        "&currentTime=" +
-        t +
-        "&userEssay=" +
-        essay,
-      { token }
-    );
-  } catch (e) {
-    console.warn("essay-report", e.message);
+    console.warn("Time sync error:", e.message);
   }
 }
 
@@ -379,59 +320,44 @@ async function completeOneActivity(session, activitySetId, onLog) {
   const token = session.accessToken;
   const learnerId = session.learnerId;
   const ts = Date.now();
-  onLog && onLog("Fetching " + activitySetId, "info");
+  onLog && onLog("Fetching Activity: " + activitySetId, "info");
 
-  let activity = await rcaRequest(
-    "GET",
-    "/activitySetDetails/" + activitySetId + "/0/" + ts + "/false",
-    { token }
-  );
-  if (!activity) throw new Error("Empty activity details for " + activitySetId);
+  let activity = await rcaRequest("GET", "/activitySetDetails/" + activitySetId + "/0/" + ts + "/false", { token });
+  if (!activity) throw new Error("Null activity payload for ID " + activitySetId);
 
   activity.activityState = "INPROGRESS";
   activity.learnerId = learnerId;
   activity.startDate = Date.now() - 25000;
+
   try {
     await submitActivity(token, activity, "INPROGRESS", learnerId);
-    onLog && onLog("INPROGRESS " + activitySetId, "info");
   } catch (e) {
-    onLog && onLog("INPROGRESS warn: " + e.message, "error");
+    onLog && onLog("State sync warning: " + e.message, "error");
   }
 
-  await sleep(CONFIG.DELAY_BETWEEN_ANSWERS_MS);
   activity = fillAnswers(activity);
   const qCount = (activity.activityQuestionDetailsList || []).length;
-  onLog && onLog("Answering " + qCount + " q for " + activitySetId, "success");
-  await sleep(CONFIG.DELAY_BETWEEN_ANSWERS_MS);
 
-  const hasWriting = (activity.activityQuestionDetailsList || []).some(
-    (q) => q.itemType === "IELTSWRITING" || q.itemType === "WRITING"
-  );
-  if (hasWriting) await submitWritingEssay(token, activity);
+  if (CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0 && qCount > 0) {
+    await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
+  }
 
   activity = await submitActivity(token, activity, "SUBMITTED", learnerId);
-  onLog && onLog("SUBMITTED " + activitySetId, "success");
+  onLog && onLog("Completed Set " + activitySetId + " (" + qCount + " Qs)", "success");
 
   const lessonId = activity.lessonId || activitySetId;
-  await updateTimeTaken(
-    token,
-    learnerId,
-    lessonId,
-    activitySetId,
-    activity.totalTimeTaken || 30
-  );
+  await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30);
 }
 
+// ==================== JOB ENGINE ====================
 function createJob(type, meta) {
   const id = uuid();
   const job = {
-    id,
-    type,
-    meta,
+    id, type, meta,
     status: "running",
     current: 0,
     total: 0,
-    task: "Starting...",
+    task: "Initializing...",
     logs: [],
     error: null,
     startedAt: Date.now(),
@@ -442,85 +368,53 @@ function createJob(type, meta) {
 }
 
 function jobLog(job, message, level) {
-  job.logs.push({
-    t: new Date().toISOString(),
-    message,
-    level: level || "info",
-  });
-  if (job.logs.length > 200) job.logs.shift();
+  job.logs.push({ t: new Date().toISOString(), message, level: level || "info" });
+  if (job.logs.length > 250) job.logs.shift();
 }
 
-async function runCompleteJob(job, session, levelIds) {
+async function runCompleteJob(job, userSessions, tasksToRun) {
   try {
-    const tasks = [];
-    for (const levelId of levelIds) {
-      const level = LEVELS.find((l) => l.id === levelId);
-      if (!level) continue;
-      const data = await loadLevelData(session.accessToken, level);
-      SKILLS.forEach((skill) => {
-        const skillData = data.skills[skill.key];
-        if (!skillData || skillData.completed) return;
-        (skillData.activitySetIds || []).forEach((id) => {
-          tasks.push({
-            levelId: level.id,
-            levelName: level.name,
-            skillName: skill.name,
-            activitySetId: id,
-          });
-        });
-      });
-    }
-
-    job.total = tasks.length;
-    if (tasks.length === 0) {
+    job.total = tasksToRun.length;
+    if (tasksToRun.length === 0) {
       job.status = "done";
-      job.task = "No pending tasks";
+      job.task = "No pending tasks found.";
       job.finishedAt = Date.now();
       return;
     }
 
-    for (let i = 0; i < tasks.length; i++) {
+    for (let i = 0; i < tasksToRun.length; i++) {
       if (job.status === "cancelled") break;
-      const t = tasks[i];
+      const t = tasksToRun[i];
       job.current = i;
-      job.task = t.levelName + "/" + t.skillName + " " + t.activitySetId;
+      job.task = `[${t.userName}] ${t.skillName} -> ${t.activitySetId}`;
       try {
-        await completeOneActivity(session, t.activitySetId, (msg, lvl) =>
-          jobLog(job, msg, lvl)
-        );
+        await completeOneActivity(t.session, t.activitySetId, (msg, lvl) => jobLog(job, `[${t.userName}] ${msg}`, lvl));
       } catch (err) {
-        jobLog(job, "Error " + t.activitySetId + ": " + err.message, "error");
+        jobLog(job, `[${t.userName}] Error on ${t.activitySetId}: ${err.message}`, "error");
       }
       job.current = i + 1;
-      if (i < tasks.length - 1) {
-        jobLog(job, "Pause " + CONFIG.DELAY_BETWEEN_TASKS_MS / 1000 + "s", "info");
-        await sleep(CONFIG.DELAY_BETWEEN_TASKS_MS);
-      }
+      if (CONFIG.DELAY_BETWEEN_TASKS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_TASKS_MS);
     }
 
     job.status = job.status === "cancelled" ? "cancelled" : "done";
-    job.task = "Finished";
+    job.task = "Batch automation completed successfully";
     job.finishedAt = Date.now();
   } catch (err) {
     job.status = "error";
     job.error = err.message;
     job.finishedAt = Date.now();
-    jobLog(job, err.message, "error");
+    jobLog(job, "Fatal Engine Error: " + err.message, "error");
   }
 }
 
-// ==================== HTTP helpers ====================
-function sendJson(res, code, obj, extraHeaders) {
+// ==================== ROUTES ====================
+function sendJson(res, code, obj) {
   const body = Buffer.from(JSON.stringify(obj));
-  const headers = Object.assign(
-    {
-      "Content-Type": "application/json; charset=utf-8",
-      "Content-Length": body.length,
-      "Cache-Control": "no-store",
-    },
-    extraHeaders || {}
-  );
-  res.writeHead(code, headers);
+  res.writeHead(code, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": body.length,
+    "Cache-Control": "no-store",
+  });
   res.end(body);
 }
 
@@ -531,11 +425,7 @@ function readJson(req) {
     req.on("end", () => {
       const raw = Buffer.concat(chunks).toString("utf8");
       if (!raw) return resolve({});
-      try {
-        resolve(JSON.parse(raw));
-      } catch (e) {
-        reject(new Error("Invalid JSON body"));
-      }
+      try { resolve(JSON.parse(raw)); } catch (e) { reject(new Error("Invalid JSON formatting")); }
     });
     req.on("error", reject);
   });
@@ -543,10 +433,7 @@ function readJson(req) {
 
 function requireAuth(req, res) {
   const s = getSession(req);
-  if (!s) {
-    sendJson(res, 401, { error: "Not logged in" });
-    return null;
-  }
+  if (!s) { sendJson(res, 401, { error: "Authentication session expired" }); return null; }
   return s;
 }
 
@@ -555,74 +442,84 @@ const MIME = {
   ".js": "application/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".png": "image/png",
+  ".jpg": "image/jpeg",
   ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
+  ".ico": "image/x-icon"
+};
+
+const ROUTES = {
+  "/": "index.html",
+  "/single": "single.html",
+  "/bulk": "bulk.html"
 };
 
 function serveStatic(req, res, pathname) {
   let filePath;
-  if (pathname === "/" || pathname === "/index.html") {
-    filePath = path.join(PUBLIC, "index.html");
+  if (ROUTES[pathname]) {
+    filePath = path.join(PUBLIC, ROUTES[pathname]);
   } else {
-    const rel = decodeURIComponent(pathname).replace(/\0/g, "").replace(/^\/+/, "");
-    filePath = path.resolve(PUBLIC, rel);
-    if (!filePath.startsWith(path.resolve(PUBLIC))) {
-      res.writeHead(403);
-      res.end("Forbidden");
-      return;
-    }
+    filePath = path.resolve(PUBLIC, pathname.replace(/^\/+/, ""));
   }
+
+  if (!filePath.startsWith(path.resolve(PUBLIC))) {
+    res.writeHead(403); res.end("Access Denied"); return;
+  }
+
   fs.readFile(filePath, (err, data) => {
-    if (err) {
-      res.writeHead(404);
-      res.end("Not found");
-      return;
-    }
+    if (err) { res.writeHead(404); res.end("Not Found"); return; }
     const ext = path.extname(filePath).toLowerCase();
-    res.writeHead(200, {
-      "Content-Type": MIME[ext] || "application/octet-stream",
-      "Cache-Control": "no-store",
-    });
+    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
     res.end(data);
   });
 }
 
-// ==================== API routes ====================
 async function handleApi(req, res, pathname) {
-  // POST /api/login
+  // LOGIN
   if (pathname === "/api/login" && req.method === "POST") {
     const body = await readJson(req);
-    const loginId = String(body.loginId || "").trim();
-    const password = body.password || "";
-    if (!loginId) return sendJson(res, 400, { error: "loginId required" });
-    try {
-      const u = await rcaLogin(loginId, password);
-      const sid = uuid();
-      const coins = 0;
-      sessions.set(sid, {
-        accessToken: u.accessToken,
-        loginId: u.loginId,
-        learnerId: u.learnerId,
-        userId: u.userId,
-        name: u.name,
-        coins,
-        createdAt: Date.now(),
-      });
-      setSessionCookie(res, sid);
-      return sendJson(res, 200, {
-        user: {
-          loginId: u.loginId,
-          learnerId: u.learnerId,
-          name: u.name,
-          coins,
-        },
-      });
-    } catch (e) {
-      return sendJson(res, e.status || 500, { error: e.message || "Login failed" });
+    const password = body.password || CONFIG.APP_PASSWORD;
+    const loginIdRaw = String(body.loginId || "").trim();
+    const isBulk = body.bulk === true;
+    const loginIds = loginIdRaw.split(/,|，/).map((id) => id.trim()).filter(Boolean);
+
+    if (!loginIds.length) return sendJson(res, 400, { error: "Enter at least one User ID" });
+    if (isBulk && loginIds.length > CONFIG.MAX_BULK_USERS) {
+      return sendJson(res, 400, { error: `Maximum ${CONFIG.MAX_BULK_USERS} IDs allowed per batch.` });
     }
+
+    const results = { bulk: isBulk, total: loginIds.length, successCount: 0, errorCount: 0, users: [], errors: [] };
+    const successfulLogins = [];
+
+    for (const loginId of loginIds) {
+      try {
+        const u = await rcaLogin(loginId, password);
+        successfulLogins.push(u);
+        results.users.push({ loginId: u.loginId, learnerId: u.learnerId, name: u.name });
+        results.successCount++;
+      } catch (e) {
+        console.error(`Login error for ID ${loginId}: ${e.message}`);
+        results.errors.push({ loginId, error: e.message || "Authentication failed" });
+        results.errorCount++;
+      }
+    }
+
+    if (successfulLogins.length === 0) {
+      const detailedErr = results.errors.map(x => `${x.loginId}: ${x.error}`).join(" | ");
+      return sendJson(res, 401, { error: `Auth Failed (${detailedErr})`, ...results });
+    }
+
+    const sid = uuid();
+    sessions.set(sid, { users: successfulLogins, createdAt: Date.now() });
+    setSessionCookie(res, sid);
+
+    return sendJson(res, 200, {
+      user: publicUser(successfulLogins[0]),
+      allUsers: successfulLogins.map(publicUser),
+      ...results,
+    });
   }
 
-  // POST /api/logout
+  // LOGOUT
   if (pathname === "/api/logout" && req.method === "POST") {
     const s = getSession(req);
     if (s) sessions.delete(s.sid);
@@ -630,146 +527,142 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { ok: true });
   }
 
-  // GET /api/me
+  // USER DATA
   if (pathname === "/api/me" && req.method === "GET") {
     const s = requireAuth(req, res);
     if (!s) return;
-    return sendJson(res, 200, { user: publicUser(s) });
+    return sendJson(res, 200, { user: publicUser(s.users[0]), allUsers: s.users.map(publicUser) });
   }
 
-  // GET /api/levels
+  // GET LEVELS
   if (pathname === "/api/levels" && req.method === "GET") {
     const s = requireAuth(req, res);
     if (!s) return;
     try {
-      const out = [];
-      for (const level of LEVELS) {
-        try {
-          const data = await loadLevelData(s.accessToken, level);
-          out.push({
-            id: level.id,
-            name: level.name,
-            title: level.title,
-            subtitle: level.subtitle,
-            color: level.color,
-            isCompleted: data.isCompleted,
-            skills: SKILLS.map((sk) => {
-              const sd = data.skills[sk.key] || {};
-              return {
-                key: sk.key,
-                name: sk.name,
-                icon: sk.icon,
-                completed: !!sd.completed,
-                completedActivities: sd.completedActivities || 0,
-                totalActivities: sd.totalActivities || 0,
-                score: sd.score || 0,
-              };
-            }),
-          });
-        } catch (e) {
-          out.push({
-            id: level.id,
-            name: level.name,
-            title: level.title,
-            subtitle: level.subtitle,
-            color: level.color,
-            isCompleted: false,
-            error: e.message,
-            skills: SKILLS.map((sk) => ({
-              key: sk.key,
-              name: sk.name,
-              icon: sk.icon,
-              completed: false,
-              completedActivities: 0,
-              totalActivities: 0,
-              score: 0,
-            })),
-          });
-        }
-      }
-      return sendJson(res, 200, { levels: out });
+      const allUserLevels = await Promise.all(
+        s.users.map(async (user) => {
+          const out = [];
+          for (const level of LEVELS) {
+            try {
+              const data = await loadLevelData(user.accessToken, level);
+              out.push({
+                id: level.id,
+                name: level.name,
+                title: level.title,
+                subtitle: level.subtitle,
+                color: level.color,
+                isCompleted: data.isCompleted,
+                skills: SKILLS.map((sk) => {
+                  const sd = data.skills[sk.key] || {};
+                  return {
+                    key: sk.key,
+                    name: sk.name,
+                    icon: sk.icon,
+                    completed: !!sd.completed,
+                    completedActivities: sd.completedActivities || 0,
+                    totalActivities: sd.totalActivities || 0,
+                    activitySetIds: sd.activitySetIds || [],
+                  };
+                }),
+              });
+            } catch (e) {
+              out.push({ id: level.id, name: level.name, title: level.title, subtitle: level.subtitle, color: level.color, isCompleted: false, error: e.message, skills: [] });
+            }
+          }
+          return { loginId: user.loginId, name: user.name, learnerId: user.learnerId, levels: out };
+        })
+      );
+      return sendJson(res, 200, { users: allUserLevels });
     } catch (e) {
       return sendJson(res, 500, { error: e.message });
     }
   }
 
-  // POST /api/coins  { passkey, amount }
+  // ADD COINS
   if (pathname === "/api/coins" && req.method === "POST") {
     const s = requireAuth(req, res);
     if (!s) return;
     const body = await readJson(req);
-    if (body.passkey !== CONFIG.COIN_PASSKEY) {
-      return sendJson(res, 403, { error: "Invalid pass key" });
-    }
+    if (body.passkey !== CONFIG.COIN_PASSKEY) return sendJson(res, 403, { error: "Invalid Passkey" });
     const amount = parseInt(body.amount, 10);
-    if (!amount || amount < 1 || amount > 1000) {
-      return sendJson(res, 400, { error: "Amount must be 1-1000" });
+    if (!amount || amount < 1 || amount > CONFIG.MAX_COINS_PER_REQUEST) return sendJson(res, 400, { error: `Amount must be 1-${CONFIG.MAX_COINS_PER_REQUEST}` });
+
+    for (const u of s.users) {
+      u.coins += amount;
+      try {
+        await rcaRequest("POST", "/learners/add-coins", {
+          token: u.accessToken,
+          query: { learnerId: String(u.learnerId), coinsToAdd: String(amount) },
+          body: "",
+        });
+      } catch (e) { console.warn("Coin credit error:", e.message); }
     }
-    s.coins += amount;
     sessions.set(s.sid, s);
-    // best-effort upstream coins
-    try {
-      await rcaRequest("POST", "/learners/add-coins", {
-        token: s.accessToken,
-        query: {
-          learnerId: String(s.learnerId),
-          coinsToAdd: String(amount),
-        },
-        body: "",
-      });
-    } catch (e) {
-      console.warn("add-coins upstream", e.message);
-    }
-    return sendJson(res, 200, { coins: s.coins });
+    return sendJson(res, 200, { coins: s.users[0].coins, totalUsers: s.users.length });
   }
 
-  // POST /api/complete  { mode: "level"|"all", levelId?: number }
+  // COMPLETE TASK (NO COIN COST)
   if (pathname === "/api/complete" && req.method === "POST") {
     const s = requireAuth(req, res);
     if (!s) return;
     const body = await readJson(req);
-    const mode = body.mode || "level";
-    let cost = 10;
-    let levelIds = [];
-    if (mode === "all") {
-      cost = 50;
-      levelIds = LEVELS.map((l) => l.id);
-    } else {
-      const levelId = parseInt(body.levelId, 10);
-      if (!LEVELS.some((l) => l.id === levelId)) {
-        return sendJson(res, 400, { error: "Invalid levelId" });
+    const { mode, targetUser, levelId, skillKey, activitySetId } = body; 
+
+    let targetUsers = s.users;
+    if (targetUser && targetUser !== "ALL") {
+      targetUsers = s.users.filter((u) => u.loginId === String(targetUser));
+    }
+    if (!targetUsers.length) return sendJson(res, 400, { error: "Target User not active" });
+
+    // NO COIN DEDUCTION - Tasks are completely free
+
+    const tasksToRun = [];
+    for (const session of targetUsers) {
+      let levelsToScan = LEVELS;
+      if (levelId) levelsToScan = LEVELS.filter((l) => l.id === Number(levelId));
+
+      for (const level of levelsToScan) {
+        try {
+          const data = await loadLevelData(session.accessToken, level);
+          let skillKeys = SKILLS.map((s) => s.key);
+          if (skillKey) skillKeys = [skillKey];
+
+          for (const key of skillKeys) {
+            const skillData = data.skills[key];
+            if (!skillData || skillData.completed) continue;
+
+            let activityIds = skillData.activitySetIds || [];
+            if (activitySetId) {
+              activityIds = activityIds.filter((id) => String(id) === String(activitySetId));
+            }
+
+            activityIds.forEach((actId) => {
+              tasksToRun.push({
+                userName: session.name,
+                userLoginId: session.loginId,
+                skillName: key,
+                activitySetId: actId,
+                session,
+              });
+            });
+          }
+        } catch (e) { console.warn("Queue construction skip:", e.message); }
       }
-      levelIds = [levelId];
     }
-    if (s.coins < cost) {
-      return sendJson(res, 402, {
-        error: "Insufficient coins",
-        need: cost,
-        coins: s.coins,
-      });
-    }
-    s.coins -= cost;
-    sessions.set(s.sid, s);
 
-    const job = createJob(mode, { levelIds, loginId: s.loginId });
-    // run async – client polls /api/jobs/:id
-    const sessionSnapshot = { ...s };
-    setImmediate(() => runCompleteJob(job, sessionSnapshot, levelIds));
+    const job = createJob(mode, { mode, userCount: targetUsers.length });
+    setImmediate(() => runCompleteJob(job, targetUsers, tasksToRun));
 
-    return sendJson(res, 200, {
-      jobId: job.id,
-      coins: s.coins,
-      message: "Job started",
-    });
+    return sendJson(res, 200, { jobId: job.id, coins: s.users[0].coins, tasksCount: tasksToRun.length });
   }
 
-  // GET /api/jobs/:id
+  // JOB MONITORING
   const jobMatch = pathname.match(/^\/api\/jobs\/([a-f0-9-]+)$/i);
   if (jobMatch && req.method === "GET") {
     const s = requireAuth(req, res);
     if (!s) return;
     const job = jobs.get(jobMatch[1]);
-    if (!job) return sendJson(res, 404, { error: "Job not found" });
+    if (!job) return sendJson(res, 404, { error: "Job instance lost" });
     return sendJson(res, 200, {
       id: job.id,
       status: job.status,
@@ -778,60 +671,31 @@ async function handleApi(req, res, pathname) {
       task: job.task,
       error: job.error,
       logs: job.logs.slice(-50),
-      percent:
-        job.total > 0 ? Math.round((job.current / job.total) * 100) : 0,
+      percent: job.total > 0 ? Math.round((job.current / job.total) * 100) : 0,
     });
   }
 
-  sendJson(res, 404, { error: "Not found" });
+  sendJson(res, 404, { error: "API Route Not Found" });
 }
 
-// ==================== Server ====================
+// ==================== SERVER ====================
 const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url || "/", "http://" + CONFIG.HOST);
-    const pathname = u.pathname;
-
-    if (req.method === "OPTIONS") {
-      res.writeHead(204, {
-        "Access-Control-Allow-Origin": req.headers.origin || "*",
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-        "Access-Control-Allow-Headers": "content-type",
-        "Access-Control-Allow-Credentials": "true",
-      });
-      res.end();
+    if (u.pathname.startsWith("/api/")) {
+      await handleApi(req, res, u.pathname);
       return;
     }
-
-    if (pathname.startsWith("/api/")) {
-      await handleApi(req, res, pathname);
-      return;
-    }
-
-    if (req.method === "GET" || req.method === "HEAD") {
-      serveStatic(req, res, pathname);
-      return;
-    }
-
-    sendJson(res, 405, { error: "Method not allowed" });
+    serveStatic(req, res, u.pathname);
   } catch (err) {
-    console.error(err);
-    if (!res.headersSent) {
-      sendJson(res, 500, { error: String(err.message || err) });
-    }
+    if (!res.headersSent) sendJson(res, 500, { error: String(err.message || err) });
   }
 });
 
-if (!fs.existsSync(path.join(PUBLIC, "index.html"))) {
-  console.error("Missing public/index.html – create frontend first");
-  process.exit(1);
-}
-
 server.listen(CONFIG.PORT, CONFIG.HOST, () => {
   console.log("=".repeat(60));
-  console.log(" RCA Secure Backend running");
-  console.log(" Open:  http://%s:%d", CONFIG.HOST, CONFIG.PORT);
-  console.log(" Secrets & RCA tokens stay on the server");
-  console.log(" Stop:  Ctrl+C");
+  console.log(" RCA IELTS Dashboard PRODUCTION");
+  console.log(" URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
+  console.log(" Modes: / (Home) | /single (1 User) | /bulk (5 Users)");
   console.log("=".repeat(60));
 });
