@@ -44,6 +44,138 @@
       66% { transform: translate(-20px,20px) scale(0.9); }
     }
 
+    /* ===== PRELOADER ===== */
+    .preloader-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 99999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 14, 46, 0.4);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      transition: opacity 0.8s ease, visibility 0.8s ease;
+      font-family: 'Poppins', sans-serif;
+    }
+    [data-theme="light"] .preloader-overlay {
+      background: rgba(248, 250, 252, 0.4);
+    }
+    .preloader-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      animation: fadeInUp 0.6s ease-out;
+    }
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(30px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .preloader-logo {
+      width: 100px;
+      height: 100px;
+      border-radius: 50%;
+      object-fit: cover;
+      display: block;
+      margin-bottom: 32px;
+      animation: preloaderBeat 1.4s ease-in-out infinite;
+      box-shadow: 0 0 40px rgba(99,102,241,0.15);
+    }
+    @keyframes preloaderBeat {
+      0%, 100% { transform: scale(1); box-shadow: 0 0 40px rgba(99,102,241,0.15); }
+      50% { transform: scale(1.06); box-shadow: 0 0 60px rgba(99,102,241,0.25); }
+    }
+    .preloader-bar-track {
+      width: 240px;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 50px;
+      overflow: hidden;
+      box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
+      padding: 1px;
+      position: relative;
+    }
+    [data-theme="light"] .preloader-bar-track {
+      background: rgba(0, 0, 0, 0.06);
+      box-shadow: inset 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .preloader-bar-fill {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, #6366f1, #8b5cf6, #a855f7, #ec4899);
+      background-size: 300% 100%;
+      border-radius: 50px;
+      transition: width 0.3s ease-out;
+      animation: gradientMove 2s ease infinite;
+      box-shadow: 0 0 25px rgba(99,102,241,0.3);
+      position: relative;
+    }
+    @keyframes gradientMove {
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+    .preloader-text-wrapper {
+      margin-top: 22px;
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      font-family: 'Poppins', sans-serif;
+    }
+    .preloader-text {
+      font-size: 18px;
+      font-weight: 600;
+      color: rgba(255, 255, 255, 0.85);
+      letter-spacing: 0.3px;
+      text-shadow: 0 2px 15px rgba(99,102,241,0.15);
+    }
+    [data-theme="light"] .preloader-text {
+      color: rgba(30, 27, 75, 0.8);
+    }
+    .preloader-dots {
+      display: flex;
+      gap: 2px;
+      align-items: center;
+      margin-left: 2px;
+    }
+    .dot {
+      font-size: 22px;
+      font-weight: 800;
+      color: rgba(255, 255, 255, 0.85);
+      animation: typingDot 1.4s infinite;
+      opacity: 0;
+    }
+    [data-theme="light"] .dot {
+      color: rgba(30, 27, 75, 0.8);
+    }
+    .dot:nth-child(1) { animation-delay: 0s; }
+    .dot:nth-child(2) { animation-delay: 0.2s; }
+    .dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes typingDot {
+      0% { opacity: 0; transform: translateY(-5px) scale(0.8); }
+      30% { opacity: 1; transform: translateY(0) scale(1); }
+      60% { opacity: 1; transform: translateY(0) scale(1); }
+      100% { opacity: 0; transform: translateY(5px) scale(0.8); }
+    }
+    .preloader-overlay.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    @media (max-width: 480px) {
+      .preloader-logo { width: 75px; height: 75px; margin-bottom: 25px; }
+      .preloader-bar-track { width: 180px; height: 5px; }
+      .preloader-text { font-size: 16px; }
+      .dot { font-size: 18px; }
+    }
+    @media (max-width: 360px) {
+      .preloader-logo { width: 60px; height: 60px; margin-bottom: 20px; }
+      .preloader-bar-track { width: 150px; height: 4px; }
+      .preloader-text { font-size: 14px; }
+      .dot { font-size: 16px; }
+    }
+
     .navbar {
       position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
       background: rgba(15,14,46,0.8); backdrop-filter: blur(20px);
@@ -103,20 +235,24 @@
     }
     .section-subtitle { text-align: center; color: var(--text-secondary); margin-bottom: 50px; font-size: 16px; }
 
-    .steps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 24px; }
+    .steps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 24px; }
     .step-card {
       background: var(--card); border: 1px solid var(--border); border-radius: 20px; padding: 30px;
-      text-align: center; transition: 0.3s; position: relative; overflow: hidden;
+      text-align: left; transition: 0.3s; position: relative; overflow: hidden;
     }
     .step-card:hover { transform: translateY(-5px); border-color: var(--primary); }
-    .step-number {
-      width: 50px; height: 50px; border-radius: 14px;
+    .step-header {
+      display: flex; align-items: center; gap: 14px; margin-bottom: 16px;
+    }
+    .step-icon {
+      width: 44px; height: 44px; border-radius: 12px;
       background: linear-gradient(135deg, var(--primary), var(--secondary));
       color: white; display: flex; align-items: center; justify-content: center;
-      font-weight: 700; font-size: 20px; margin: 0 auto 20px;
+      font-size: 18px; flex-shrink: 0;
     }
-    .step-card h3 { font-size: 18px; margin-bottom: 10px; }
-    .step-card p { font-size: 14px; color: var(--text-secondary); line-height: 1.6; }
+    .step-card h3 { font-size: 17px; margin-bottom: 10px; }
+    .step-card p { font-size: 13.5px; color: var(--text-secondary); line-height: 1.7; }
+    .step-card p strong { color: var(--text); }
 
     .modes-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 30px; margin-top: 20px; }
     .mode-card {
@@ -150,10 +286,12 @@
       background: linear-gradient(90deg, var(--primary), var(--secondary), var(--warning));
     }
     .creator-avatar {
-      width: 90px; height: 90px; border-radius: 50%;
-      background: linear-gradient(135deg, var(--primary), var(--secondary));
-      display: flex; align-items: center; justify-content: center; font-size: 36px; color: white;
-      margin: 0 auto 20px; font-weight: 700;
+      width: 100px; height: 100px; border-radius: 50%;
+      object-fit: cover;
+      display: block;
+      margin: 0 auto 20px;
+      border: 3px solid rgba(99,102,241,0.3);
+      box-shadow: 0 10px 30px rgba(99,102,241,0.2);
     }
     .creator-card h3 { font-size: 24px; margin-bottom: 8px; }
     .creator-card .role { color: var(--text-secondary); font-size: 14px; margin-bottom: 24px; }
@@ -188,6 +326,24 @@
   </style>
 </head>
 <body>
+  <!-- PRELOADER -->
+  <div id="preloader" class="preloader-overlay">
+    <div class="preloader-container">
+      <img src="https://i.ibb.co/p6Ymrk4V/IMG-20260729-123510-675.jpg" alt="Logo" class="preloader-logo" />
+      <div class="preloader-bar-track">
+        <div id="progressFill" class="preloader-bar-fill"></div>
+      </div>
+      <div class="preloader-text-wrapper">
+        <span class="preloader-text">Loading</span>
+        <span class="preloader-dots">
+          <span class="dot">.</span>
+          <span class="dot">.</span>
+          <span class="dot">.</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
   <div class="bg-animation">
     <div class="circle"></div><div class="circle"></div><div class="circle"></div>
   </div>
@@ -219,7 +375,7 @@
 
   <section class="hero">
     <h1>IELTS Automation Dashboard</h1>
-    <p>Complete your IELTS modules instantly. No delays, no hassle. Choose Single mode for personal use or Bulk mode for managing up to 5 accounts simultaneously.</p>
+    <p>Complete your IELTS modules instantly with zero delay. Choose Single mode for personal use or Bulk mode for managing up to 5 accounts at once.</p>
     <div class="hero-btns">
       <a href="/single" class="btn btn-primary"><i class="fas fa-user"></i> Single Mode</a>
       <a href="/bulk" class="btn btn-secondary"><i class="fas fa-users"></i> Bulk Mode</a>
@@ -228,32 +384,51 @@
 
   <section class="section">
     <h2 class="section-title">How to Use</h2>
-    <p class="section-subtitle">Follow these simple steps to get started — designed for beginners</p>
+    <p class="section-subtitle">Follow these 4 simple steps to complete your IELTS modules in seconds</p>
     <div class="steps-grid">
       <div class="step-card">
-        <div class="step-number">1</div>
-        <h3>Choose Your Mode</h3>
-        <p>Click on <strong>Single Mode</strong> for 1 account or <strong>Bulk Mode</strong> for up to 5 accounts at once.</p>
+        <div class="step-header">
+          <div class="step-icon"><i class="fas fa-mouse-pointer"></i></div>
+          <h3>1. Pick Your Mode</h3>
+        </div>
+        <p>
+          Click <strong>Single Mode</strong> if you want to manage just your own account. 
+          Click <strong>Bulk Mode</strong> if you need to run tasks on up to 5 accounts together. 
+          Bulk mode shows all users side-by-side in one dashboard.
+        </p>
       </div>
       <div class="step-card">
-        <div class="step-number">2</div>
-        <h3>Enter Login Details</h3>
-        <p>Type your User ID (comma-separated for Bulk) and Password. Then click Login.</p>
+        <div class="step-header">
+          <div class="step-icon"><i class="fas fa-sign-in-alt"></i></div>
+          <h3>2. Login Your Account</h3>
+        </div>
+        <p>
+          Enter your <strong>User ID</strong> and <strong>Password</strong>, then hit Login. 
+          In Bulk Mode, type up to 5 IDs separated by commas (e.g. <em>12345, 67890, 11111</em>). 
+          The system will authenticate all accounts and load their levels.
+        </p>
       </div>
       <div class="step-card">
-        <div class="step-number">3</div>
-        <h3>Add Coins (If Needed)</h3>
-        <p>Click <strong>Add Coins</strong>, enter the Pass Key, and add up to 500 coins per request.</p>
+        <div class="step-header">
+          <div class="step-icon"><i class="fas fa-rocket"></i></div>
+          <h3>3. Complete Tasks Instantly</h3>
+        </div>
+        <p>
+          Your dashboard shows all 6 levels (A1 to C2). Click <strong>Solve Level</strong> to finish an entire level, 
+          <strong>Solve Skill</strong> for a specific skill, or <strong>Solve Q</strong> for individual activities. 
+          Everything completes with <strong>zero delay</strong> — no waiting.
+        </p>
       </div>
       <div class="step-card">
-        <div class="step-number">4</div>
-        <h3>Complete Tasks</h3>
-        <p>Click any <strong>Solve</strong> button next to a level, skill, or activity. It completes instantly with zero delay.</p>
-      </div>
-      <div class="step-card">
-        <div class="step-number">5</div>
-        <h3>Track Progress</h3>
-        <p>Watch the live progress bar and logs. Refresh the dashboard to see updated completion status.</p>
+        <div class="step-header">
+          <div class="step-icon"><i class="fas fa-coins"></i></div>
+          <h3>4. Add Coins (Optional)</h3>
+        </div>
+        <p>
+          Need more coins? Click <strong>Add Coins</strong> in the sidebar, enter your Pass Key, 
+          and type any amount from <strong>1 to 500</strong>. Coins are added instantly to your account. 
+          No coins are deducted for completing tasks — it's completely free.
+        </p>
       </div>
     </div>
   </section>
@@ -298,7 +473,7 @@
     <h2 class="section-title">Meet the Creator</h2>
     <p class="section-subtitle">Built with passion for students</p>
     <div class="creator-card">
-      <div class="creator-avatar">A</div>
+      <img src="https://i.ibb.co/p6Ymrk4V/IMG-20260729-123510-675.jpg" alt="Ankit" class="creator-avatar" />
       <h3>Ankit</h3>
       <p class="role">Class +1 Commerce | Developer & Student</p>
       <p style="color:var(--text-secondary);font-size:14px;margin-bottom:24px;">
@@ -316,6 +491,32 @@
   </footer>
 
   <script>
+    /* ===== PRELOADER ===== */
+    (function() {
+      const preloader = document.getElementById('preloader');
+      const progressFill = document.getElementById('progressFill');
+      const baseTime = 800 + Math.random() * 1200;
+      const steps = 30;
+      let current = 0;
+      const increment = 100 / steps;
+      const intervalTime = baseTime / steps;
+
+      function updateProgress() {
+        current += increment;
+        if (current > 100) current = 100;
+        progressFill.style.width = current + '%';
+        if (current < 100) {
+          setTimeout(updateProgress, intervalTime);
+        } else {
+          setTimeout(() => {
+            preloader.classList.add('hidden');
+            setTimeout(() => preloader.style.display = 'none', 800);
+          }, 300);
+        }
+      }
+      updateProgress();
+    })();
+
     function toggleTheme() {
       const html = document.documentElement;
       const icon = document.getElementById('themeIcon');
