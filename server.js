@@ -2,8 +2,7 @@
 /**
  * RCA IELTS Dashboard – Production Edition
  * Routes: / (Home), /single (Single User), /bulk (Bulk 5-User)
- * Features: No task delays, No coin cost for tasks, Direct coin API, Dark/Light UI
- * UPDATES: Unique headers per user + Skip already completed activities
+ * Features: No task delays, No coin cost, Real client headers, Skip done questions
  */
 
 "use strict";
@@ -64,44 +63,64 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ==================== UNIQUE HEADERS PER USER ====================
-function getRcaHeaders(token, loginId) {
-  const hash = crypto.createHash('sha256').update(String(loginId || 'default')).digest('hex');
-  
-  const chromeVersions = ['120.0.0.0', '119.0.0.0', '121.0.0.0', '118.0.0.0', '122.0.0.0', '123.0.0.0'];
+// ==================== CLIENT INFO (Real IP/UA from Frontend) ====================
+function getClientInfo(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  const ip = forwarded ? forwarded.split(",")[0].trim() : (req.socket.remoteAddress || "127.0.0.1");
+  return {
+    ip,
+    ua: req.headers["x-client-ua"] || req.headers["user-agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    screen: req.headers["x-client-screen"] || "1920x1080",
+    timezone: req.headers["x-client-timezone"] || "Asia/Kolkata",
+    lang: req.headers["x-client-lang"] || "en-US",
+    platform: req.headers["x-client-platform"] || "Win32",
+  };
+}
+
+// ==================== UNIQUE HEADERS PER USER (with real client data) ====================
+function getRcaHeaders(token, loginId, clientInfo) {
+  const hashInput = String(loginId || "default") + (clientInfo ? clientInfo.ip : "");
+  const hash = crypto.createHash("sha256").update(hashInput).digest("hex");
+
+  const chromeVersions = ["120.0.0.0", "119.0.0.0", "121.0.0.0", "118.0.0.0", "122.0.0.0", "123.0.0.0"];
   const platforms = [
-    'Windows NT 10.0; Win64; x64',
-    'Macintosh; Intel Mac OS X 10_15_7',
-    'X11; Linux x86_64',
-    'Windows NT 10.0; Win64; x64',
-    'Macintosh; Intel Mac OS X 10_15_7',
-    'Windows NT 10.0; Win64; x64'
+    "Windows NT 10.0; Win64; x64",
+    "Macintosh; Intel Mac OS X 10_15_7",
+    "X11; Linux x86_64",
+    "Windows NT 10.0; Win64; x64",
+    "Macintosh; Intel Mac OS X 10_15_7",
+    "Windows NT 10.0; Win64; x64",
   ];
-  
+
   const idx = parseInt(hash.slice(0, 4), 16) % chromeVersions.length;
   const version = chromeVersions[idx];
-  const platform = platforms[idx];
-  
-  const ua = `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`;
-  const deviceId = hash.slice(0, 16) + '-' + hash.slice(16, 32);
-  
+
+  let realUa = (clientInfo && clientInfo.ua) || `Mozilla/5.0 (${platforms[idx]}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`;
+
+  if (realUa.includes("Chrome/")) {
+    const patch = parseInt(hash.slice(4, 8), 16) % 100;
+    realUa = realUa.replace(/Chrome\/[\d.]+/, `Chrome/${120 + (idx % 5)}.0.${patch}.0`);
+  }
+
+  const deviceId = hash.slice(0, 16) + "-" + hash.slice(16, 32);
+
   const headers = {
     "Accept": "application/json, text/plain, */*",
     "Content-Type": "application/json",
     "Origin": "https://rca.englishhelper.com",
     "Referer": "https://rca.englishhelper.com/",
-    "User-Agent": ua,
+    "User-Agent": realUa,
     "x-request-id": uuid(),
     "x-journey-id": uuid(),
     "x-device-id": deviceId,
   };
-  
+
   if (token) headers["Authorization"] = "Bearer " + token;
   return headers;
 }
 
 // ==================== HTTPS CLIENT ====================
-function rcaRequest(method, apiPath, { token, body, query, loginId } = {}) {
+function rcaRequest(method, apiPath, { token, body, query, loginId, clientInfo } = {}) {
   return new Promise((resolve, reject) => {
     let pathStr = apiPath.startsWith("/") ? apiPath : "/" + apiPath;
     if (query) {
@@ -116,7 +135,7 @@ function rcaRequest(method, apiPath, { token, body, query, loginId } = {}) {
         ? body
         : JSON.stringify(body);
 
-    const headers = getRcaHeaders(token, loginId);
+    const headers = getRcaHeaders(token, loginId, clientInfo);
     if (payload !== null) headers["Content-Length"] = Buffer.byteLength(payload);
 
     const url = new URL(CONFIG.API_BASE + pathStr);
@@ -127,7 +146,7 @@ function rcaRequest(method, apiPath, { token, body, query, loginId } = {}) {
       path: url.pathname + url.search,
       method: method.toUpperCase(),
       headers,
-      rejectUnauthorized: false
+      rejectUnauthorized: false,
     };
 
     const req = https.request(opts, (res) => {
@@ -163,10 +182,21 @@ function rcaRequest(method, apiPath, { token, body, query, loginId } = {}) {
 
 // ==================== SESSION MANAGEMENT ====================
 function getSession(req) {
+  let sid = null;
+
   const cookie = req.headers.cookie || "";
   const m = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
-  if (!m) return null;
-  const sid = decodeURIComponent(m[1]);
+  if (m) sid = decodeURIComponent(m[1]);
+
+  if (!sid) sid = req.headers["x-auth-token"] || null;
+
+  if (!sid && req.headers["authorization"]) {
+    const auth = req.headers["authorization"];
+    if (auth.startsWith("Bearer ")) sid = auth.slice(7);
+  }
+
+  if (!sid) return null;
+
   const s = sessions.get(sid);
   if (!s) return null;
   if (Date.now() - s.createdAt > CONFIG.SESSION_TTL_MS) {
@@ -177,7 +207,17 @@ function getSession(req) {
 }
 
 function setSessionCookie(res, sid) {
-  res.setHeader("Set-Cookie", "sid=" + encodeURIComponent(sid) + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" + Math.floor(CONFIG.SESSION_TTL_MS / 1000));
+  const cookieVal = "sid=" + encodeURIComponent(sid) + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" + Math.floor(CONFIG.SESSION_TTL_MS / 1000);
+  const existing = res.getHeader("Set-Cookie");
+  if (existing) {
+    if (Array.isArray(existing)) {
+      res.setHeader("Set-Cookie", [...existing, cookieVal]);
+    } else {
+      res.setHeader("Set-Cookie", [existing, cookieVal]);
+    }
+  } else {
+    res.setHeader("Set-Cookie", cookieVal);
+  }
 }
 
 function clearSessionCookie(res) {
@@ -189,9 +229,9 @@ function publicUser(u) {
 }
 
 // ==================== RCA AUTOMATION ====================
-async function rcaLogin(loginId, userPassword) {
+async function rcaLogin(loginId, userPassword, clientInfo) {
   const reqPassword = userPassword || CONFIG.APP_PASSWORD;
-  console.log(`[Attempting Login] ID: ${loginId}`);
+  console.log(`[Attempting Login] ID: ${loginId} | IP: ${clientInfo ? clientInfo.ip : "unknown"}`);
 
   const loginRes = await rcaRequest("POST", "/login", {
     body: {
@@ -203,6 +243,7 @@ async function rcaLogin(loginId, userPassword) {
       date: Date.now(),
     },
     loginId,
+    clientInfo,
   });
 
   if (!loginRes || (!loginRes.accessToken && !loginRes.token)) {
@@ -212,7 +253,7 @@ async function rcaLogin(loginId, userPassword) {
   const token = loginRes.accessToken || loginRes.token;
   let details = {};
   try {
-    details = await rcaRequest("POST", "/userDetails?inputKeywordList=0", { token, body: "", loginId });
+    details = await rcaRequest("POST", "/userDetails?inputKeywordList=0", { token, body: "", loginId, clientInfo });
   } catch (e) {
     console.warn(`[UserDetails Warning] ${e.message}`);
   }
@@ -226,10 +267,11 @@ async function rcaLogin(loginId, userPassword) {
     coins: details.totalCoins || 0,
     packageId: details.packageId || CONFIG.PACKAGE_ID,
     curriculumId: details.curriculumId || CONFIG.CURRICULUM_ID,
+    clientInfo,
   };
 }
 
-async function loadLevelData(token, level, loginId) {
+async function loadLevelData(token, level, loginId, clientInfo) {
   const list = await rcaRequest("GET", "/ielts/create-lessons", {
     token,
     query: {
@@ -239,6 +281,7 @@ async function loadLevelData(token, level, loginId) {
       packageId: String(CONFIG.PACKAGE_ID),
     },
     loginId,
+    clientInfo,
   });
   const skills = {};
   let allDone = true;
@@ -280,10 +323,21 @@ function pickCorrectAnswer(q) {
   return null;
 }
 
+// ==================== PARTIAL COMPLETION FIX ====================
 function fillAnswers(activity) {
   const list = activity.activityQuestionDetailsList || [];
   let correctCount = 0;
+  let alreadyDoneCount = 0;
+
   list.forEach((q) => {
+    // ===== SKIP ALREADY CORRECT QUESTIONS =====
+    if (q.isUserAnswerCorrect === true && q.userAnswer != null) {
+      correctCount++;
+      alreadyDoneCount++;
+      q.allAnswersRecorded = true;
+      return;
+    }
+
     if (q.itemType === "IELTSWRITING" || q.itemType === "WRITING") {
       q.userEssay = "In today's world, consistency and focused preparation form the core foundation for achieving strong scores in IELTS examinations.";
       q.isUserAnswerCorrect = true;
@@ -293,6 +347,7 @@ function fillAnswers(activity) {
       correctCount++;
       return;
     }
+
     const ans = pickCorrectAnswer(q);
     if (ans != null && ans !== "") {
       q.userAnswer = ans;
@@ -306,13 +361,16 @@ function fillAnswers(activity) {
     }
     q.allAnswersRecorded = true;
   });
+
+  console.log(`[FillAnswers] Total Qs: ${list.length}, Already Correct: ${alreadyDoneCount}, Newly Filled: ${list.length - alreadyDoneCount}`);
+
   activity.totalQuestionsAttempted = list.length;
   activity.totalAnswersCorrect = correctCount;
   activity.totalEarnedScore = correctCount;
   return activity;
 }
 
-async function submitActivity(token, activity, state, learnerId, loginId) {
+async function submitActivity(token, activity, state, learnerId, loginId, clientInfo) {
   const payload = Object.assign({}, activity);
   payload.activityState = state;
   payload.learnerId = learnerId;
@@ -323,11 +381,11 @@ async function submitActivity(token, activity, state, learnerId, loginId) {
     payload.endDate = now;
     payload.totalTimeTaken = Math.max(20, Math.floor((payload.endDate - payload.startDate) / 1000));
   }
-  await rcaRequest("POST", "/activity/data", { token, body: payload, loginId });
+  await rcaRequest("POST", "/activity/data", { token, body: payload, loginId, clientInfo });
   return payload;
 }
 
-async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, loginId) {
+async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, loginId, clientInfo) {
   try {
     await rcaRequest("POST", "/update-user-time-taken", {
       token,
@@ -340,6 +398,7 @@ async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, 
       },
       body: "",
       loginId,
+      clientInfo,
     });
   } catch (e) {
     console.warn("Time sync error:", e.message);
@@ -350,19 +409,28 @@ async function completeOneActivity(session, activitySetId, onLog) {
   const token = session.accessToken;
   const learnerId = session.learnerId;
   const loginId = session.loginId;
+  const clientInfo = session.clientInfo;
   const ts = Date.now();
   onLog && onLog("Fetching Activity: " + activitySetId, "info");
 
-  let activity = await rcaRequest("GET", "/activitySetDetails/" + activitySetId + "/0/" + ts + "/false", { token, loginId });
+  let activity = await rcaRequest("GET", "/activitySetDetails/" + activitySetId + "/0/" + ts + "/false", { token, loginId, clientInfo });
   if (!activity) throw new Error("Null activity payload for ID " + activitySetId);
 
-  // ===== SKIP ALREADY COMPLETED =====
-  const alreadyDone = activity.activityState === "SUBMITTED" || 
-                      activity.activityState === "COMPLETED" || 
+  // ===== SKIP FULLY COMPLETED ACTIVITY =====
+  const alreadyDone = activity.activityState === "SUBMITTED" ||
+                      activity.activityState === "COMPLETED" ||
                       activity.isCompleted === true;
   if (alreadyDone) {
     onLog && onLog("Already completed (" + (activity.activityState || "done") + "), skipping: " + activitySetId, "warn");
     return { skipped: true, activitySetId, reason: "already_completed" };
+  }
+
+  // ===== SKIP IF ALL QUESTIONS ALREADY CORRECT =====
+  const allQuestions = activity.activityQuestionDetailsList || [];
+  const allAlreadyCorrect = allQuestions.length > 0 && allQuestions.every(q => q.isUserAnswerCorrect === true && q.userAnswer != null);
+  if (allAlreadyCorrect) {
+    onLog && onLog("All questions already correct, skipping: " + activitySetId, "warn");
+    return { skipped: true, activitySetId, reason: "all_questions_done" };
   }
 
   activity.activityState = "INPROGRESS";
@@ -370,23 +438,23 @@ async function completeOneActivity(session, activitySetId, onLog) {
   activity.startDate = Date.now() - 25000;
 
   try {
-    await submitActivity(token, activity, "INPROGRESS", learnerId, loginId);
+    await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo);
   } catch (e) {
     onLog && onLog("State sync warning: " + e.message, "error");
   }
 
   activity = fillAnswers(activity);
-  const qCount = (activity.activityQuestionDetailsList || []).length;
+  const qCount = allQuestions.length;
 
   if (CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0 && qCount > 0) {
     await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
   }
 
-  activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId);
-  onLog && onLog("Completed Set " + activitySetId + " (" + qCount + " Qs)", "success");
+  activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo);
+  onLog && onLog("Completed Set " + activitySetId + " (" + qCount + " Qs, " + (allAlreadyCorrect ? "0 new" : "filled") + ")", "success");
 
   const lessonId = activity.lessonId || activitySetId;
-  await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId);
+  await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo);
 }
 
 // ==================== JOB ENGINE ====================
@@ -430,7 +498,7 @@ async function runCompleteJob(job, userSessions, tasksToRun) {
       try {
         const result = await completeOneActivity(t.session, t.activitySetId, (msg, lvl) => jobLog(job, `[${t.userName}] ${msg}`, lvl));
         if (result && result.skipped) {
-          jobLog(job, `[${t.userName}] Skipped ${t.activitySetId} (already done)`, "warn");
+          jobLog(job, `[${t.userName}] Skipped ${t.activitySetId} (${result.reason})`, "warn");
         }
       } catch (err) {
         jobLog(job, `[${t.userName}] Error on ${t.activitySetId}: ${err.message}`, "error");
@@ -453,11 +521,12 @@ async function runCompleteJob(job, userSessions, tasksToRun) {
 // ==================== ROUTES ====================
 function sendJson(res, code, obj) {
   const body = Buffer.from(JSON.stringify(obj));
-  res.writeHead(code, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": body.length,
-    "Cache-Control": "no-store",
-  });
+  res.statusCode = code;
+  if (!res.getHeader("Content-Type")) {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+  }
+  res.setHeader("Content-Length", body.length);
+  res.setHeader("Cache-Control", "no-store");
   res.end(body);
 }
 
@@ -501,7 +570,7 @@ function serveStatic(req, res, pathname) {
   if (ROUTES[pathname]) {
     filePath = path.join(PUBLIC, ROUTES[pathname]);
   } else {
-    filePath = path.resolve(PUBLIC, pathname.replace(/^\/+/, ""));
+    filePath = path.resolve(PUBLIC, pathname.replace(/^\/+/ , ""));
   }
 
   if (!filePath.startsWith(path.resolve(PUBLIC))) {
@@ -517,6 +586,8 @@ function serveStatic(req, res, pathname) {
 }
 
 async function handleApi(req, res, pathname) {
+  const clientInfo = getClientInfo(req);
+
   // LOGIN
   if (pathname === "/api/login" && req.method === "POST") {
     const body = await readJson(req);
@@ -535,7 +606,7 @@ async function handleApi(req, res, pathname) {
 
     for (const loginId of loginIds) {
       try {
-        const u = await rcaLogin(loginId, password);
+        const u = await rcaLogin(loginId, password, clientInfo);
         successfulLogins.push(u);
         results.users.push({ loginId: u.loginId, learnerId: u.learnerId, name: u.name });
         results.successCount++;
@@ -558,6 +629,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, {
       user: publicUser(successfulLogins[0]),
       allUsers: successfulLogins.map(publicUser),
+      token: sid,
       ...results,
     });
   }
@@ -587,7 +659,7 @@ async function handleApi(req, res, pathname) {
           const out = [];
           for (const level of LEVELS) {
             try {
-              const data = await loadLevelData(user.accessToken, level, user.loginId);
+              const data = await loadLevelData(user.accessToken, level, user.loginId, user.clientInfo);
               out.push({
                 id: level.id,
                 name: level.name,
@@ -638,6 +710,7 @@ async function handleApi(req, res, pathname) {
           query: { learnerId: String(u.learnerId), coinsToAdd: String(amount) },
           body: "",
           loginId: u.loginId,
+          clientInfo: u.clientInfo,
         });
       } catch (e) { console.warn("Coin credit error:", e.message); }
     }
@@ -645,20 +718,18 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { coins: s.users[0].coins, totalUsers: s.users.length });
   }
 
-  // COMPLETE TASK (NO COIN COST)
+  // COMPLETE TASK
   if (pathname === "/api/complete" && req.method === "POST") {
     const s = requireAuth(req, res);
     if (!s) return;
     const body = await readJson(req);
-    const { mode, targetUser, levelId, skillKey, activitySetId } = body; 
+    const { mode, targetUser, levelId, skillKey, activitySetId } = body;
 
     let targetUsers = s.users;
     if (targetUser && targetUser !== "ALL") {
       targetUsers = s.users.filter((u) => u.loginId === String(targetUser));
     }
     if (!targetUsers.length) return sendJson(res, 400, { error: "Target User not active" });
-
-    // NO COIN DEDUCTION - Tasks are completely free
 
     const tasksToRun = [];
     for (const session of targetUsers) {
@@ -667,7 +738,7 @@ async function handleApi(req, res, pathname) {
 
       for (const level of levelsToScan) {
         try {
-          const data = await loadLevelData(session.accessToken, level, session.loginId);
+          const data = await loadLevelData(session.accessToken, level, session.loginId, session.clientInfo);
           let skillKeys = SKILLS.map((s) => s.key);
           if (skillKey) skillKeys = [skillKey];
 
