@@ -27,7 +27,6 @@
     .circle:nth-child(2) { width: 300px; height: 300px; background: var(--secondary); bottom: -50px; right: -50px; animation-delay: -5s; }
     @keyframes float { 0%,100%{transform:translate(0,0)scale(1)} 33%{transform:translate(30px,-30px)scale(1.1)} 66%{transform:translate(-20px,20px)scale(0.9)} }
 
-    /* Navbar */
     .navbar { position: fixed; top: 0; left: 0; right: 0; z-index: 1000; background: rgba(15,14,46,0.9); backdrop-filter: blur(20px); border-bottom: 1px solid var(--border); padding: 0 30px; height: 70px; display: flex; align-items: center; justify-content: space-between; }
     [data-theme="light"] .navbar { background: rgba(255,255,255,0.9); }
     .nav-brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 20px; text-decoration: none; color: var(--text); }
@@ -38,7 +37,6 @@
     .back-btn:hover { color: var(--primary); }
     .hamburger { display: none; font-size: 24px; cursor: pointer; color: var(--text); }
 
-    /* Login */
     .login-container { display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 100px 20px 40px; }
     .login-box { background: var(--card); backdrop-filter: blur(20px); border: 1px solid var(--border); border-radius: 24px; padding: 50px 40px; width: 100%; max-width: 480px; text-align: center; box-shadow: 0 25px 50px rgba(0,0,0,0.2); }
     .login-box .logo { width: 80px; height: 80px; background: linear-gradient(135deg,var(--primary),var(--secondary)); border-radius: 20px; display: flex; align-items: center; justify-content: center; margin: 0 auto 25px; font-size: 36px; color: white; box-shadow: 0 10px 30px rgba(99,102,241,0.4); }
@@ -63,7 +61,6 @@
     .error-msg.show { display: block; }
     .hint { color: var(--text-secondary); font-size: 12px; margin-top: 6px; text-align: left; }
 
-    /* Dashboard */
     .dashboard { display: none; padding: 90px 30px 40px; max-width: 1100px; margin: 0 auto; }
     .dash-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; flex-wrap: wrap; gap: 16px; }
     .dash-header h2 { font-size: 26px; font-weight: 700; }
@@ -111,7 +108,6 @@
     .activity-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
     .activity-chip { background: rgba(255,255,255,0.05); border: 1px solid var(--border); padding: 4px 8px; border-radius: 6px; font-size: 11px; display: flex; align-items: center; gap: 6px; }
 
-    /* Progress Overlay */
     .progress-overlay { position: fixed; inset: 0; background: rgba(15,14,46,0.95); backdrop-filter: blur(10px); z-index: 1000; display: none; justify-content: center; align-items: center; flex-direction: column; padding: 20px; }
     .progress-overlay.active { display: flex; }
     .progress-box { background: var(--card); border: 1px solid var(--border); border-radius: 24px; padding: 40px; width: 100%; max-width: 500px; text-align: center; }
@@ -125,12 +121,10 @@
     .log-item.error { color: var(--danger); }
     .log-item.info { color: var(--info); }
 
-    /* Modal */
     .modal-overlay { position: fixed; inset: 0; background: rgba(15,14,46,0.8); backdrop-filter: blur(10px); z-index: 2000; display: none; justify-content: center; align-items: center; padding: 20px; }
     .modal-overlay.active { display: flex; }
     .modal-box { background: var(--card); border: 1px solid var(--border); border-radius: 24px; padding: 35px; width: 100%; max-width: 420px; }
 
-    /* Toast */
     .toast-container { position: fixed; top: 20px; right: 20px; z-index: 3000; display: flex; flex-direction: column; gap: 10px; }
     .toast { background: var(--card); backdrop-filter: blur(20px); border: 1px solid var(--border); border-radius: 14px; padding: 16px 20px; display: flex; align-items: center; gap: 12px; min-width: 280px; max-width: 400px; }
     .toast.success { border-left: 4px solid var(--success); }
@@ -177,7 +171,6 @@
     </button>
   </div>
 
-  <!-- LOGIN -->
   <div class="login-container" id="loginScreen">
     <div class="login-box">
       <div class="logo"><i class="fas fa-user"></i></div>
@@ -199,7 +192,6 @@
     </div>
   </div>
 
-  <!-- DASHBOARD -->
   <div class="dashboard" id="dashboard">
     <div class="dash-header">
       <h2><i class="fas fa-chart-line" style="color:var(--primary);margin-right:10px;"></i>Dashboard</h2>
@@ -229,7 +221,6 @@
     <div id="levelsContainer"></div>
   </div>
 
-  <!-- PROGRESS OVERLAY -->
   <div class="progress-overlay" id="progressOverlay">
     <div class="progress-box">
       <div class="progress-icon"><i class="fas fa-cog fa-spin"></i></div>
@@ -241,7 +232,6 @@
     </div>
   </div>
 
-  <!-- ADD COINS MODAL -->
   <div class="modal-overlay" id="coinModal">
     <div class="modal-box">
       <h3 style="margin-bottom:20px"><i class="fas fa-coins" style="color:var(--warning)"></i> Add Coins</h3>
@@ -269,9 +259,19 @@
     let savedPasskey = "";
 
     async function api(path, options = {}) {
+      const token = localStorage.getItem('rca_token') || '';
       const res = await fetch(path, {
         method: options.method || "GET",
-        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        headers: {
+          "Content-Type": "application/json",
+          "x-client-ua": navigator.userAgent,
+          "x-client-screen": `${window.screen.width}x${window.screen.height}`,
+          "x-client-timezone": Intl.DateTimeFormat().resolvedOptions().timeZone,
+          "x-client-lang": navigator.language,
+          "x-client-platform": navigator.platform,
+          "x-auth-token": token,
+          ...(options.headers || {}),
+        },
         body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
         credentials: "same-origin",
       });
@@ -315,6 +315,7 @@
         const data = await api("/api/login", { method: "POST", body: { loginId, password, bulk: false } });
         if (data.user) {
           user = data.user;
+          if (data.token) localStorage.setItem('rca_token', data.token);
           document.getElementById("loginScreen").style.display = "none";
           document.getElementById("dashboard").style.display = "block";
           updateUserUI();
@@ -332,6 +333,7 @@
 
     async function handleLogout() {
       try { await api("/api/logout", { method: "POST", body: {} }); } catch (_) {}
+      localStorage.removeItem('rca_token');
       user = null; allLevels = [];
       document.getElementById("dashboard").style.display = "none";
       document.getElementById("loginScreen").style.display = "flex";
@@ -510,7 +512,6 @@
     if (saved === 'light') { document.documentElement.setAttribute('data-theme', 'light'); document.getElementById('themeIcon').className = 'fas fa-sun'; }
     document.querySelectorAll('.mobile-menu a').forEach(link => { link.addEventListener('click', () => document.getElementById('mobileMenu').classList.remove('active')); });
 
-    // Session restore
     api("/api/me").then((d) => {
       if (d.user) { user = d.user; document.getElementById("loginScreen").style.display = "none"; document.getElementById("dashboard").style.display = "block"; updateUserUI(); loadLevels(); }
     }).catch(() => {});
