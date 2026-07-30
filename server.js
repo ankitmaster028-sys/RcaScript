@@ -3,6 +3,7 @@
  * RCA IELTS Dashboard – Production Edition
  * Routes: / (Home), /single (Single User), /bulk (Bulk 5-User)
  * Features: No task delays, No coin cost for tasks, Direct coin API, Dark/Light UI
+ * UPDATES: Unique headers per user + Skip already completed activities
  */
 
 "use strict";
@@ -63,8 +64,44 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ==================== UNIQUE HEADERS PER USER ====================
+function getRcaHeaders(token, loginId) {
+  const hash = crypto.createHash('sha256').update(String(loginId || 'default')).digest('hex');
+  
+  const chromeVersions = ['120.0.0.0', '119.0.0.0', '121.0.0.0', '118.0.0.0', '122.0.0.0', '123.0.0.0'];
+  const platforms = [
+    'Windows NT 10.0; Win64; x64',
+    'Macintosh; Intel Mac OS X 10_15_7',
+    'X11; Linux x86_64',
+    'Windows NT 10.0; Win64; x64',
+    'Macintosh; Intel Mac OS X 10_15_7',
+    'Windows NT 10.0; Win64; x64'
+  ];
+  
+  const idx = parseInt(hash.slice(0, 4), 16) % chromeVersions.length;
+  const version = chromeVersions[idx];
+  const platform = platforms[idx];
+  
+  const ua = `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`;
+  const deviceId = hash.slice(0, 16) + '-' + hash.slice(16, 32);
+  
+  const headers = {
+    "Accept": "application/json, text/plain, */*",
+    "Content-Type": "application/json",
+    "Origin": "https://rca.englishhelper.com",
+    "Referer": "https://rca.englishhelper.com/",
+    "User-Agent": ua,
+    "x-request-id": uuid(),
+    "x-journey-id": uuid(),
+    "x-device-id": deviceId,
+  };
+  
+  if (token) headers["Authorization"] = "Bearer " + token;
+  return headers;
+}
+
 // ==================== HTTPS CLIENT ====================
-function rcaRequest(method, apiPath, { token, body, query } = {}) {
+function rcaRequest(method, apiPath, { token, body, query, loginId } = {}) {
   return new Promise((resolve, reject) => {
     let pathStr = apiPath.startsWith("/") ? apiPath : "/" + apiPath;
     if (query) {
@@ -79,17 +116,7 @@ function rcaRequest(method, apiPath, { token, body, query } = {}) {
         ? body
         : JSON.stringify(body);
 
-    const headers = {
-      "Accept": "application/json, text/plain, */*",
-      "Content-Type": "application/json",
-      "Origin": "https://rca.englishhelper.com",
-      "Referer": "https://rca.englishhelper.com/",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "x-request-id": uuid(),
-      "x-journey-id": uuid(),
-    };
-
-    if (token) headers["Authorization"] = "Bearer " + token;
+    const headers = getRcaHeaders(token, loginId);
     if (payload !== null) headers["Content-Length"] = Buffer.byteLength(payload);
 
     const url = new URL(CONFIG.API_BASE + pathStr);
@@ -175,6 +202,7 @@ async function rcaLogin(loginId, userPassword) {
       caLoginConfigId: "0",
       date: Date.now(),
     },
+    loginId,
   });
 
   if (!loginRes || (!loginRes.accessToken && !loginRes.token)) {
@@ -184,7 +212,7 @@ async function rcaLogin(loginId, userPassword) {
   const token = loginRes.accessToken || loginRes.token;
   let details = {};
   try {
-    details = await rcaRequest("POST", "/userDetails?inputKeywordList=0", { token, body: "" });
+    details = await rcaRequest("POST", "/userDetails?inputKeywordList=0", { token, body: "", loginId });
   } catch (e) {
     console.warn(`[UserDetails Warning] ${e.message}`);
   }
@@ -201,7 +229,7 @@ async function rcaLogin(loginId, userPassword) {
   };
 }
 
-async function loadLevelData(token, level) {
+async function loadLevelData(token, level, loginId) {
   const list = await rcaRequest("GET", "/ielts/create-lessons", {
     token,
     query: {
@@ -210,6 +238,7 @@ async function loadLevelData(token, level) {
       standardLevelId: String(level.id),
       packageId: String(CONFIG.PACKAGE_ID),
     },
+    loginId,
   });
   const skills = {};
   let allDone = true;
@@ -283,7 +312,7 @@ function fillAnswers(activity) {
   return activity;
 }
 
-async function submitActivity(token, activity, state, learnerId) {
+async function submitActivity(token, activity, state, learnerId, loginId) {
   const payload = Object.assign({}, activity);
   payload.activityState = state;
   payload.learnerId = learnerId;
@@ -294,11 +323,11 @@ async function submitActivity(token, activity, state, learnerId) {
     payload.endDate = now;
     payload.totalTimeTaken = Math.max(20, Math.floor((payload.endDate - payload.startDate) / 1000));
   }
-  await rcaRequest("POST", "/activity/data", { token, body: payload });
+  await rcaRequest("POST", "/activity/data", { token, body: payload, loginId });
   return payload;
 }
 
-async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs) {
+async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, loginId) {
   try {
     await rcaRequest("POST", "/update-user-time-taken", {
       token,
@@ -310,6 +339,7 @@ async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs) 
         activityType: "Ielts",
       },
       body: "",
+      loginId,
     });
   } catch (e) {
     console.warn("Time sync error:", e.message);
@@ -319,18 +349,28 @@ async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs) 
 async function completeOneActivity(session, activitySetId, onLog) {
   const token = session.accessToken;
   const learnerId = session.learnerId;
+  const loginId = session.loginId;
   const ts = Date.now();
   onLog && onLog("Fetching Activity: " + activitySetId, "info");
 
-  let activity = await rcaRequest("GET", "/activitySetDetails/" + activitySetId + "/0/" + ts + "/false", { token });
+  let activity = await rcaRequest("GET", "/activitySetDetails/" + activitySetId + "/0/" + ts + "/false", { token, loginId });
   if (!activity) throw new Error("Null activity payload for ID " + activitySetId);
+
+  // ===== SKIP ALREADY COMPLETED =====
+  const alreadyDone = activity.activityState === "SUBMITTED" || 
+                      activity.activityState === "COMPLETED" || 
+                      activity.isCompleted === true;
+  if (alreadyDone) {
+    onLog && onLog("Already completed (" + (activity.activityState || "done") + "), skipping: " + activitySetId, "warn");
+    return { skipped: true, activitySetId, reason: "already_completed" };
+  }
 
   activity.activityState = "INPROGRESS";
   activity.learnerId = learnerId;
   activity.startDate = Date.now() - 25000;
 
   try {
-    await submitActivity(token, activity, "INPROGRESS", learnerId);
+    await submitActivity(token, activity, "INPROGRESS", learnerId, loginId);
   } catch (e) {
     onLog && onLog("State sync warning: " + e.message, "error");
   }
@@ -342,11 +382,11 @@ async function completeOneActivity(session, activitySetId, onLog) {
     await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
   }
 
-  activity = await submitActivity(token, activity, "SUBMITTED", learnerId);
+  activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId);
   onLog && onLog("Completed Set " + activitySetId + " (" + qCount + " Qs)", "success");
 
   const lessonId = activity.lessonId || activitySetId;
-  await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30);
+  await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId);
 }
 
 // ==================== JOB ENGINE ====================
@@ -388,7 +428,10 @@ async function runCompleteJob(job, userSessions, tasksToRun) {
       job.current = i;
       job.task = `[${t.userName}] ${t.skillName} -> ${t.activitySetId}`;
       try {
-        await completeOneActivity(t.session, t.activitySetId, (msg, lvl) => jobLog(job, `[${t.userName}] ${msg}`, lvl));
+        const result = await completeOneActivity(t.session, t.activitySetId, (msg, lvl) => jobLog(job, `[${t.userName}] ${msg}`, lvl));
+        if (result && result.skipped) {
+          jobLog(job, `[${t.userName}] Skipped ${t.activitySetId} (already done)`, "warn");
+        }
       } catch (err) {
         jobLog(job, `[${t.userName}] Error on ${t.activitySetId}: ${err.message}`, "error");
       }
@@ -544,7 +587,7 @@ async function handleApi(req, res, pathname) {
           const out = [];
           for (const level of LEVELS) {
             try {
-              const data = await loadLevelData(user.accessToken, level);
+              const data = await loadLevelData(user.accessToken, level, user.loginId);
               out.push({
                 id: level.id,
                 name: level.name,
@@ -594,6 +637,7 @@ async function handleApi(req, res, pathname) {
           token: u.accessToken,
           query: { learnerId: String(u.learnerId), coinsToAdd: String(amount) },
           body: "",
+          loginId: u.loginId,
         });
       } catch (e) { console.warn("Coin credit error:", e.message); }
     }
@@ -623,7 +667,7 @@ async function handleApi(req, res, pathname) {
 
       for (const level of levelsToScan) {
         try {
-          const data = await loadLevelData(session.accessToken, level);
+          const data = await loadLevelData(session.accessToken, level, session.loginId);
           let skillKeys = SKILLS.map((s) => s.key);
           if (skillKey) skillKeys = [skillKey];
 
