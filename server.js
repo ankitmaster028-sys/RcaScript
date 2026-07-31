@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * RCA IELTS Dashboard – Proxy-Only Edition (No Direct Fallback)
+ * RCA IELTS Dashboard – Production Edition (Proxy + Prefetch + Fallback)
  * Routes: / (Home), /single (Single User), /bulk (Bulk 5-User)
  * Features: No task delays, No coin cost, Real client headers, Skip done questions,
- *           4 Proxy rotation ONLY (no fallback), Prefetch filtering
+ *           4 Proxy rotation with fallback, Prefetch filtering, Low proxy bandwidth
  */
 
 "use strict";
@@ -73,7 +73,7 @@ function createProxyConnection(proxy, targetHost, targetPort) {
   });
 }
 
-const connMeta = { mode: "proxy", proxyUser: null };
+const connMeta = { mode: "direct", proxyUser: null };
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
@@ -178,7 +178,7 @@ function getRcaHeaders(token, loginId, clientInfo) {
   return headers;
 }
 
-// ==================== HTTPS CLIENT (Proxy-Only, No Fallback) ====================
+// ==================== HTTPS CLIENT (with Proxy + Fallback) ====================
 function executeRequest(opts, payload) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -241,29 +241,32 @@ function rcaRequest(method, apiPath, { token, body, query, loginId, clientInfo, 
       rejectUnauthorized: false,
     };
 
-    // ===== PROXY-ONLY: No direct fallback =====
     const proxyOrder = getProxyOrder();
-    const attempts = [...proxyOrder]; // Sirf proxies, direct nahi
+    const attempts = useProxy
+      ? [...proxyOrder, null]
+      : [null, ...proxyOrder];
 
     let lastError;
 
     for (const proxy of attempts) {
       try {
         let requestOpts = { ...opts };
-        const socket = await createProxyConnection(proxy, opts.hostname, opts.port || 8443);
-        requestOpts.createConnection = () => socket;
+        if (proxy) {
+          const socket = await createProxyConnection(proxy, opts.hostname, opts.port || 8443);
+          requestOpts.createConnection = () => socket;
+        }
         const data = await executeRequest(requestOpts, payload);
-        connMeta.mode = "proxy";
-        connMeta.proxyUser = proxy.auth.user;
+        connMeta.mode = proxy ? "proxy" : "direct";
+        connMeta.proxyUser = proxy ? proxy.auth.user : null;
         resolve(data);
         return;
       } catch (e) {
         lastError = e;
-        console.warn(`[Connection Fail] ${proxy.auth.user}@${proxy.host}: ${e.message}`);
+        console.warn(`[Connection Fail] ${proxy ? proxy.auth.user + "@" + proxy.host : "direct"}: ${e.message}`);
       }
     }
 
-    reject(lastError || new Error("All proxy attempts failed"));
+    reject(lastError || new Error("All connection attempts failed"));
   });
 }
 
@@ -359,7 +362,7 @@ async function rcaLogin(loginId, userPassword, clientInfo) {
   };
 }
 
-async function loadLevelData(token, level, loginId, clientInfo, useProxy = true) {
+async function loadLevelData(token, level, loginId, clientInfo, useProxy = false) {
   const list = await rcaRequest("GET", "/ielts/create-lessons", {
     token,
     query: {
@@ -474,7 +477,7 @@ async function submitActivity(token, activity, state, learnerId, loginId, client
   return payload;
 }
 
-async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, loginId, clientInfo, useProxy = true) {
+async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, loginId, clientInfo, useProxy = false) {
   try {
     await rcaRequest("POST", "/update-user-time-taken", {
       token,
@@ -505,7 +508,7 @@ async function completeOneActivity(session, activitySetId, onLog, useProxy = tru
 
   let activity = await rcaRequest("GET", "/activitySetDetails/" + activitySetId + "/0/" + ts + "/false", { 
     token, loginId, clientInfo, 
-    useProxy: true 
+    useProxy: false 
   });
   if (!activity) throw new Error("Null activity payload for ID " + activitySetId);
 
@@ -547,7 +550,7 @@ async function completeOneActivity(session, activitySetId, onLog, useProxy = tru
   onLog && onLog("Completed Set " + activitySetId + " (" + qCount + " Qs, " + (allAlreadyCorrect ? "0 new" : "filled") + ")", "success");
 
   const lessonId = activity.lessonId || activitySetId;
-  await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, true);
+  await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, false);
 }
 
 // ==================== JOB ENGINE ====================
@@ -575,7 +578,7 @@ function jobLog(job, message, level) {
 
 async function runCompleteJob(job, userSessions, rawTasks) {
   try {
-    // ===== PHASE 1: Prefetch & Filter (proxy-only) =====
+    // ===== PHASE 1: Prefetch & Filter (saves proxy bandwidth by using direct) =====
     job.status = "loading";
     job.task = "Loading tasks...";
     jobLog(job, "Prefetching activity statuses to skip already completed ones...", "info");
@@ -595,7 +598,7 @@ async function runCompleteJob(job, userSessions, rawTasks) {
           token: t.session.accessToken,
           loginId: t.session.loginId,
           clientInfo: t.session.clientInfo,
-          useProxy: true,
+          useProxy: false,
         });
 
         const alreadyDone = activity && (
@@ -802,7 +805,7 @@ async function handleApi(req, res, pathname) {
           const out = [];
           for (const level of LEVELS) {
             try {
-              const data = await loadLevelData(user.accessToken, level, user.loginId, user.clientInfo, true);
+              const data = await loadLevelData(user.accessToken, level, user.loginId, user.clientInfo, false);
               out.push({
                 id: level.id,
                 name: level.name,
@@ -882,7 +885,7 @@ async function handleApi(req, res, pathname) {
 
       for (const level of levelsToScan) {
         try {
-          const data = await loadLevelData(session.accessToken, level, session.loginId, session.clientInfo, true);
+          const data = await loadLevelData(session.accessToken, level, session.loginId, session.clientInfo, false);
           let skillKeys = SKILLS.map((s) => s.key);
           if (skillKey) skillKeys = [skillKey];
 
@@ -958,9 +961,9 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(CONFIG.PORT, CONFIG.HOST, () => {
   console.log("=".repeat(60));
-  console.log(" RCA IELTS Dashboard PROXY-ONLY (No Direct Fallback)");
+  console.log(" RCA IELTS Dashboard PRODUCTION (Proxy + Prefetch Edition)");
   console.log(" URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
   console.log(" Modes: / (Home) | /single (1 User) | /bulk (5 Users)");
-  console.log(" Proxies: " + PROXY_POOL.length + " configured (rotating only)");
+  console.log(" Proxies: " + PROXY_POOL.length + " configured (rotating + fallback)");
   console.log("=".repeat(60));
 });
