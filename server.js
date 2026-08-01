@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * RCA IELTS Dashboard – Direct Connection Edition (No Proxy)
- * Routes: / (Home), /single (Single User), /bulk (Bulk 5-User)
- * Features: No task delays, No coin cost, Real client headers, Skip done questions
+ * RCA IELTS Dashboard – Vercel Compatible Edition
+ * - Direct connection (no proxy)
+ * - Encrypted cookie sessions (no server-side memory)
+ * - Stateless auth for serverless hosting
  */
 
 "use strict";
@@ -16,10 +17,40 @@ const { URL } = require("url");
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
+// ==================== SESSION ENCRYPTION (Vercel Fix) ====================
+// Vercel mein memory share nahi hoti, isliye session ko cookie mein encrypt karke bhejte hain
+const SESSION_SECRET = process.env.SESSION_SECRET || "MyselfAnkitVercelFix2024";
+const SESSION_KEY = crypto.scryptSync(SESSION_SECRET, "rca-ielts-salt", 32);
+
+function encryptSession(data) {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv("aes-256-cbc", SESSION_KEY, iv);
+  let enc = cipher.update(JSON.stringify(data), "utf8", "hex");
+  enc += cipher.final("hex");
+  return iv.toString("hex") + ":" + enc;
+}
+
+function decryptSession(str) {
+  try {
+    const parts = str.split(":");
+    if (parts.length !== 2) return null;
+    const iv = Buffer.from(parts[0], "hex");
+    const decipher = crypto.createDecipheriv("aes-256-cbc", SESSION_KEY, iv);
+    let dec = decipher.update(parts[1], "hex", "utf8");
+    dec += decipher.final("utf8");
+    const data = JSON.parse(dec);
+    if (!data || !data.createdAt) return null;
+    if (Date.now() - data.createdAt > CONFIG.SESSION_TTL_MS) return null;
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
 // ==================== CONFIGURATION ====================
 const CONFIG = {
-  HOST: "127.0.0.1",
-  PORT: 8765,
+  HOST: "0.0.0.0",
+  PORT: process.env.PORT || 8765,
   API_BASE: "https://api-rca.englishhelper.com:8443/RcaServer/api",
   PACKAGE_ID: 5,
   ACTIVITY_TYPE_ID: 4,
@@ -52,7 +83,8 @@ const SKILLS = [
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, "public");
 
-const sessions = new Map();
+// Jobs are still in-memory: on Vercel job polling may hit a different instance.
+// For 100% reliability, use Railway/Render instead of Vercel for background tasks.
 const jobs = new Map();
 
 function uuid() {
@@ -63,7 +95,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ==================== CLIENT INFO (Real IP/UA from Frontend) ====================
+// ==================== CLIENT INFO ====================
 function getClientInfo(req) {
   const forwarded = req.headers["x-forwarded-for"];
   const ip = forwarded ? forwarded.split(",")[0].trim() : (req.socket.remoteAddress || "127.0.0.1");
@@ -77,7 +109,7 @@ function getClientInfo(req) {
   };
 }
 
-// ==================== UNIQUE HEADERS PER USER (with real client data) ====================
+// ==================== UNIQUE HEADERS PER USER ====================
 function getRcaHeaders(token, loginId, clientInfo) {
   const hashInput = String(loginId || "default") + (clientInfo ? clientInfo.ip : "");
   const hash = crypto.createHash("sha256").update(hashInput).digest("hex");
@@ -183,34 +215,25 @@ async function rcaRequest(method, apiPath, { token, body, query, loginId, client
   return executeRequest(opts, payload);
 }
 
-// ==================== SESSION MANAGEMENT ====================
+// ==================== SESSION MANAGEMENT (Cookie Based) ====================
 function getSession(req) {
-  let sid = null;
+  let token = null;
 
   const cookie = req.headers.cookie || "";
   const m = cookie.match(/(?:^|;\s*)sid=([^;]+)/);
-  if (m) sid = decodeURIComponent(m[1]);
+  if (m) token = decodeURIComponent(m[1]);
 
-  if (!sid) sid = req.headers["x-auth-token"] || null;
+  if (!token) token = req.headers["x-auth-token"] || null;
+  if (!token) return null;
 
-  if (!sid && req.headers["authorization"]) {
-    const auth = req.headers["authorization"];
-    if (auth.startsWith("Bearer ")) sid = auth.slice(7);
-  }
+  const data = decryptSession(token);
+  if (!data) return null;
 
-  if (!sid) return null;
-
-  const s = sessions.get(sid);
-  if (!s) return null;
-  if (Date.now() - s.createdAt > CONFIG.SESSION_TTL_MS) {
-    sessions.delete(sid);
-    return null;
-  }
-  return { sid, ...s };
+  return { sid: token.slice(0, 16), users: data.users, createdAt: data.createdAt };
 }
 
-function setSessionCookie(res, sid) {
-  const cookieVal = "sid=" + encodeURIComponent(sid) + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" + Math.floor(CONFIG.SESSION_TTL_MS / 1000);
+function setSessionCookie(res, encryptedToken) {
+  const cookieVal = "sid=" + encodeURIComponent(encryptedToken) + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" + Math.floor(CONFIG.SESSION_TTL_MS / 1000);
   const existing = res.getHeader("Set-Cookie");
   if (existing) {
     if (Array.isArray(existing)) {
@@ -326,14 +349,12 @@ function pickCorrectAnswer(q) {
   return null;
 }
 
-// ==================== PARTIAL COMPLETION FIX ====================
 function fillAnswers(activity) {
   const list = activity.activityQuestionDetailsList || [];
   let correctCount = 0;
   let alreadyDoneCount = 0;
 
   list.forEach((q) => {
-    // ===== SKIP ALREADY CORRECT QUESTIONS =====
     if (q.isUserAnswerCorrect === true && q.userAnswer != null) {
       correctCount++;
       alreadyDoneCount++;
@@ -421,7 +442,6 @@ async function completeOneActivity(session, activitySetId, onLog) {
   });
   if (!activity) throw new Error("Null activity payload for ID " + activitySetId);
 
-  // ===== SKIP FULLY COMPLETED ACTIVITY =====
   const alreadyDone = activity.activityState === "SUBMITTED" ||
                       activity.activityState === "COMPLETED" ||
                       activity.isCompleted === true;
@@ -430,7 +450,6 @@ async function completeOneActivity(session, activitySetId, onLog) {
     return { skipped: true, activitySetId, reason: "already_completed" };
   }
 
-  // ===== SKIP IF ALL QUESTIONS ALREADY CORRECT =====
   const allQuestions = activity.activityQuestionDetailsList || [];
   const allAlreadyCorrect = allQuestions.length > 0 && allQuestions.every(q => q.isUserAnswerCorrect === true && q.userAnswer != null);
   if (allAlreadyCorrect) {
@@ -487,7 +506,6 @@ function jobLog(job, message, level) {
 
 async function runCompleteJob(job, userSessions, rawTasks) {
   try {
-    // ===== PHASE 1: Prefetch & Filter (saves bandwidth) =====
     job.status = "loading";
     job.task = "Loading tasks...";
     jobLog(job, "Prefetching activity statuses to skip already completed ones...", "info");
@@ -529,7 +547,6 @@ async function runCompleteJob(job, userSessions, rawTasks) {
       }
     }
 
-    // ===== PHASE 2: Execute only pending tasks =====
     job.current = 0;
     job.total = pendingTasks.length;
 
@@ -675,22 +692,20 @@ async function handleApi(req, res, pathname) {
       return sendJson(res, 401, { error: `Auth Failed (${detailedErr})`, ...results });
     }
 
-    const sid = uuid();
-    sessions.set(sid, { users: successfulLogins, createdAt: Date.now() });
-    setSessionCookie(res, sid);
+    const sessionData = { users: successfulLogins, createdAt: Date.now() };
+    const encryptedToken = encryptSession(sessionData);
+    setSessionCookie(res, encryptedToken);
 
     return sendJson(res, 200, {
       user: publicUser(successfulLogins[0]),
       allUsers: successfulLogins.map(publicUser),
-      token: sid,
+      token: encryptedToken,
       ...results,
     });
   }
 
   // LOGOUT
   if (pathname === "/api/logout" && req.method === "POST") {
-    const s = getSession(req);
-    if (s) sessions.delete(s.sid);
     clearSessionCookie(res);
     return sendJson(res, 200, { ok: true });
   }
@@ -767,7 +782,11 @@ async function handleApi(req, res, pathname) {
         });
       } catch (e) { console.warn("Coin credit error:", e.message); }
     }
-    sessions.set(s.sid, s);
+
+    // Re-save updated session to cookie
+    const updatedSession = { users: s.users, createdAt: s.createdAt };
+    setSessionCookie(res, encryptSession(updatedSession));
+
     return sendJson(res, 200, { coins: s.users[0].coins, totalUsers: s.users.length });
   }
 
@@ -866,9 +885,9 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(CONFIG.PORT, CONFIG.HOST, () => {
   console.log("=".repeat(60));
-  console.log(" RCA IELTS Dashboard (Direct Connection Edition)");
+  console.log(" RCA IELTS Dashboard (Vercel Edition)");
   console.log(" URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
-  console.log(" Modes: / (Home) | /single (1 User) | /bulk (5 Users)");
+  console.log(" Session: Encrypted Cookie (Serverless Safe)");
   console.log(" Connection: Direct (No Proxy)");
   console.log("=".repeat(60));
 });
