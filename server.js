@@ -1,79 +1,20 @@
 #!/usr/bin/env node
 /**
- * RCA IELTS Dashboard – Production Edition (Proxy + Prefetch + Fallback)
+ * RCA IELTS Dashboard – Direct Connection Edition (No Proxy)
  * Routes: / (Home), /single (Single User), /bulk (Bulk 5-User)
- * Features: No task delays, No coin cost, Real client headers, Skip done questions,
- *           4 Proxy rotation with fallback, Prefetch filtering, Low proxy bandwidth
+ * Features: No task delays, No coin cost, Real client headers, Skip done questions
  */
 
 "use strict";
 
 const http = require("http");
 const https = require("https");
-const tls = require("tls");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { URL } = require("url");
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-
-// ==================== PROXY CONFIGURATION ====================
-const PROXY_POOL = [
-  { host: "p.webshare.io", port: 80, auth: { user: "hicpsinw-rotate", pass: "ywkvmkka7p5" } },
-  { host: "p.webshare.io", port: 80, auth: { user: "izoustos-rotate", pass: "fyqvtcyw4tg0" } },
-  { host: "p.webshare.io", port: 80, auth: { user: "coyygzup-rotate", pass: "qwjxinyubv4t" } },
-  { host: "p.webshare.io", port: 80, auth: { user: "zledclhf-rotate", pass: "24bnj7l970ip" } },
-];
-
-let proxyRoundRobinIndex = 0;
-
-function getProxyOrder() {
-  const ordered = [];
-  for (let i = 0; i < PROXY_POOL.length; i++) {
-    ordered.push(PROXY_POOL[(proxyRoundRobinIndex + i) % PROXY_POOL.length]);
-  }
-  proxyRoundRobinIndex++;
-  return ordered;
-}
-
-function createProxyConnection(proxy, targetHost, targetPort) {
-  return new Promise((resolve, reject) => {
-    const proxyReq = http.request({
-      host: proxy.host,
-      port: proxy.port,
-      method: "CONNECT",
-      path: `${targetHost}:${targetPort}`,
-      headers: {
-        "Host": `${targetHost}:${targetPort}`,
-        ...(proxy.auth ? {
-          "Proxy-Authorization": "Basic " + Buffer.from(`${proxy.auth.user}:${proxy.auth.pass}`).toString("base64")
-        } : {})
-      }
-    });
-
-    proxyReq.on("connect", (res, socket) => {
-      if (res.statusCode !== 200) {
-        socket.destroy();
-        reject(new Error(`Proxy CONNECT ${res.statusCode}`));
-        return;
-      }
-      const tlsSocket = tls.connect({
-        socket: socket,
-        servername: targetHost,
-        rejectUnauthorized: false
-      }, () => {
-        resolve(tlsSocket);
-      });
-      tlsSocket.on("error", reject);
-    });
-
-    proxyReq.on("error", reject);
-    proxyReq.end();
-  });
-}
-
-const connMeta = { mode: "direct", proxyUser: null };
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
@@ -178,7 +119,7 @@ function getRcaHeaders(token, loginId, clientInfo) {
   return headers;
 }
 
-// ==================== HTTPS CLIENT (with Proxy + Fallback) ====================
+// ==================== HTTPS CLIENT (Direct only) ====================
 function executeRequest(opts, payload) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -212,62 +153,34 @@ function executeRequest(opts, payload) {
   });
 }
 
-function rcaRequest(method, apiPath, { token, body, query, loginId, clientInfo, useProxy = true } = {}) {
-  return new Promise(async (resolve, reject) => {
-    let pathStr = apiPath.startsWith("/") ? apiPath : "/" + apiPath;
-    if (query) {
-      const qs = new URLSearchParams(query).toString();
-      if (qs) pathStr += (pathStr.includes("?") ? "&" : "?") + qs;
-    }
+async function rcaRequest(method, apiPath, { token, body, query, loginId, clientInfo } = {}) {
+  let pathStr = apiPath.startsWith("/") ? apiPath : "/" + apiPath;
+  if (query) {
+    const qs = new URLSearchParams(query).toString();
+    if (qs) pathStr += (pathStr.includes("?") ? "&" : "?") + qs;
+  }
 
-    const payload =
-      body === undefined || body === null
-        ? null
-        : typeof body === "string"
-        ? body
-        : JSON.stringify(body);
+  const payload =
+    body === undefined || body === null
+      ? null
+      : typeof body === "string"
+      ? body
+      : JSON.stringify(body);
 
-    const headers = getRcaHeaders(token, loginId, clientInfo);
-    if (payload !== null) headers["Content-Length"] = Buffer.byteLength(payload);
+  const headers = getRcaHeaders(token, loginId, clientInfo);
+  if (payload !== null) headers["Content-Length"] = Buffer.byteLength(payload);
 
-    const url = new URL(CONFIG.API_BASE + pathStr);
-    const opts = {
-      protocol: url.protocol,
-      hostname: url.hostname,
-      port: url.port || 8443,
-      path: url.pathname + url.search,
-      method: method.toUpperCase(),
-      headers,
-      rejectUnauthorized: false,
-    };
+  const url = new URL(CONFIG.API_BASE + pathStr);
+  const opts = {
+    hostname: url.hostname,
+    port: url.port || 8443,
+    path: url.pathname + url.search,
+    method: method.toUpperCase(),
+    headers,
+    rejectUnauthorized: false,
+  };
 
-    const proxyOrder = getProxyOrder();
-    const attempts = useProxy
-      ? [...proxyOrder, null]
-      : [null, ...proxyOrder];
-
-    let lastError;
-
-    for (const proxy of attempts) {
-      try {
-        let requestOpts = { ...opts };
-        if (proxy) {
-          const socket = await createProxyConnection(proxy, opts.hostname, opts.port || 8443);
-          requestOpts.createConnection = () => socket;
-        }
-        const data = await executeRequest(requestOpts, payload);
-        connMeta.mode = proxy ? "proxy" : "direct";
-        connMeta.proxyUser = proxy ? proxy.auth.user : null;
-        resolve(data);
-        return;
-      } catch (e) {
-        lastError = e;
-        console.warn(`[Connection Fail] ${proxy ? proxy.auth.user + "@" + proxy.host : "direct"}: ${e.message}`);
-      }
-    }
-
-    reject(lastError || new Error("All connection attempts failed"));
-  });
+  return executeRequest(opts, payload);
 }
 
 // ==================== SESSION MANAGEMENT ====================
@@ -334,7 +247,6 @@ async function rcaLogin(loginId, userPassword, clientInfo) {
     },
     loginId,
     clientInfo,
-    useProxy: true,
   });
 
   if (!loginRes || (!loginRes.accessToken && !loginRes.token)) {
@@ -344,7 +256,7 @@ async function rcaLogin(loginId, userPassword, clientInfo) {
   const token = loginRes.accessToken || loginRes.token;
   let details = {};
   try {
-    details = await rcaRequest("POST", "/userDetails?inputKeywordList=0", { token, body: "", loginId, clientInfo, useProxy: true });
+    details = await rcaRequest("POST", "/userDetails?inputKeywordList=0", { token, body: "", loginId, clientInfo });
   } catch (e) {
     console.warn(`[UserDetails Warning] ${e.message}`);
   }
@@ -362,7 +274,7 @@ async function rcaLogin(loginId, userPassword, clientInfo) {
   };
 }
 
-async function loadLevelData(token, level, loginId, clientInfo, useProxy = false) {
+async function loadLevelData(token, level, loginId, clientInfo) {
   const list = await rcaRequest("GET", "/ielts/create-lessons", {
     token,
     query: {
@@ -373,7 +285,6 @@ async function loadLevelData(token, level, loginId, clientInfo, useProxy = false
     },
     loginId,
     clientInfo,
-    useProxy,
   });
   const skills = {};
   let allDone = true;
@@ -462,7 +373,7 @@ function fillAnswers(activity) {
   return activity;
 }
 
-async function submitActivity(token, activity, state, learnerId, loginId, clientInfo, useProxy = true) {
+async function submitActivity(token, activity, state, learnerId, loginId, clientInfo) {
   const payload = Object.assign({}, activity);
   payload.activityState = state;
   payload.learnerId = learnerId;
@@ -473,11 +384,11 @@ async function submitActivity(token, activity, state, learnerId, loginId, client
     payload.endDate = now;
     payload.totalTimeTaken = Math.max(20, Math.floor((payload.endDate - payload.startDate) / 1000));
   }
-  await rcaRequest("POST", "/activity/data", { token, body: payload, loginId, clientInfo, useProxy });
+  await rcaRequest("POST", "/activity/data", { token, body: payload, loginId, clientInfo });
   return payload;
 }
 
-async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, loginId, clientInfo, useProxy = false) {
+async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, loginId, clientInfo) {
   try {
     await rcaRequest("POST", "/update-user-time-taken", {
       token,
@@ -491,14 +402,13 @@ async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, 
       body: "",
       loginId,
       clientInfo,
-      useProxy,
     });
   } catch (e) {
     console.warn("Time sync error:", e.message);
   }
 }
 
-async function completeOneActivity(session, activitySetId, onLog, useProxy = true) {
+async function completeOneActivity(session, activitySetId, onLog) {
   const token = session.accessToken;
   const learnerId = session.learnerId;
   const loginId = session.loginId;
@@ -507,8 +417,7 @@ async function completeOneActivity(session, activitySetId, onLog, useProxy = tru
   onLog && onLog("Fetching Activity: " + activitySetId, "info");
 
   let activity = await rcaRequest("GET", "/activitySetDetails/" + activitySetId + "/0/" + ts + "/false", { 
-    token, loginId, clientInfo, 
-    useProxy: false 
+    token, loginId, clientInfo
   });
   if (!activity) throw new Error("Null activity payload for ID " + activitySetId);
 
@@ -534,7 +443,7 @@ async function completeOneActivity(session, activitySetId, onLog, useProxy = tru
   activity.startDate = Date.now() - 25000;
 
   try {
-    await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, useProxy);
+    await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo);
   } catch (e) {
     onLog && onLog("State sync warning: " + e.message, "error");
   }
@@ -546,11 +455,11 @@ async function completeOneActivity(session, activitySetId, onLog, useProxy = tru
     await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
   }
 
-  activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, useProxy);
+  activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo);
   onLog && onLog("Completed Set " + activitySetId + " (" + qCount + " Qs, " + (allAlreadyCorrect ? "0 new" : "filled") + ")", "success");
 
   const lessonId = activity.lessonId || activitySetId;
-  await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, false);
+  await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo);
 }
 
 // ==================== JOB ENGINE ====================
@@ -578,7 +487,7 @@ function jobLog(job, message, level) {
 
 async function runCompleteJob(job, userSessions, rawTasks) {
   try {
-    // ===== PHASE 1: Prefetch & Filter (saves proxy bandwidth by using direct) =====
+    // ===== PHASE 1: Prefetch & Filter (saves bandwidth) =====
     job.status = "loading";
     job.task = "Loading tasks...";
     jobLog(job, "Prefetching activity statuses to skip already completed ones...", "info");
@@ -598,7 +507,6 @@ async function runCompleteJob(job, userSessions, rawTasks) {
           token: t.session.accessToken,
           loginId: t.session.loginId,
           clientInfo: t.session.clientInfo,
-          useProxy: false,
         });
 
         const alreadyDone = activity && (
@@ -641,7 +549,7 @@ async function runCompleteJob(job, userSessions, rawTasks) {
       job.current = i;
       job.task = `[${t.userName}] ${t.skillName} -> ${t.activitySetId}`;
       try {
-        const result = await completeOneActivity(t.session, t.activitySetId, (msg, lvl) => jobLog(job, `[${t.userName}] ${msg}`, lvl), true);
+        const result = await completeOneActivity(t.session, t.activitySetId, (msg, lvl) => jobLog(job, `[${t.userName}] ${msg}`, lvl));
         if (result && result.skipped) {
           jobLog(job, `[${t.userName}] Skipped ${t.activitySetId} (${result.reason})`, "warn");
         }
@@ -715,7 +623,7 @@ function serveStatic(req, res, pathname) {
   if (ROUTES[pathname]) {
     filePath = path.join(PUBLIC, ROUTES[pathname]);
   } else {
-    filePath = path.resolve(PUBLIC, pathname.replace(/^\/+/ , ""));
+    filePath = path.resolve(PUBLIC, pathname.replace(/^\/+/, ""));
   }
 
   if (!filePath.startsWith(path.resolve(PUBLIC))) {
@@ -775,7 +683,6 @@ async function handleApi(req, res, pathname) {
       user: publicUser(successfulLogins[0]),
       allUsers: successfulLogins.map(publicUser),
       token: sid,
-      connection: { mode: connMeta.mode, proxy: connMeta.proxyUser },
       ...results,
     });
   }
@@ -805,7 +712,7 @@ async function handleApi(req, res, pathname) {
           const out = [];
           for (const level of LEVELS) {
             try {
-              const data = await loadLevelData(user.accessToken, level, user.loginId, user.clientInfo, false);
+              const data = await loadLevelData(user.accessToken, level, user.loginId, user.clientInfo);
               out.push({
                 id: level.id,
                 name: level.name,
@@ -857,7 +764,6 @@ async function handleApi(req, res, pathname) {
           body: "",
           loginId: u.loginId,
           clientInfo: u.clientInfo,
-          useProxy: true,
         });
       } catch (e) { console.warn("Coin credit error:", e.message); }
     }
@@ -885,7 +791,7 @@ async function handleApi(req, res, pathname) {
 
       for (const level of levelsToScan) {
         try {
-          const data = await loadLevelData(session.accessToken, level, session.loginId, session.clientInfo, false);
+          const data = await loadLevelData(session.accessToken, level, session.loginId, session.clientInfo);
           let skillKeys = SKILLS.map((s) => s.key);
           if (skillKey) skillKeys = [skillKey];
 
@@ -918,8 +824,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { 
       jobId: job.id, 
       coins: s.users[0].coins, 
-      tasksCount: rawTasks.length,
-      connection: { mode: connMeta.mode, proxy: connMeta.proxyUser }
+      tasksCount: rawTasks.length
     });
   }
 
@@ -961,9 +866,9 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(CONFIG.PORT, CONFIG.HOST, () => {
   console.log("=".repeat(60));
-  console.log(" RCA IELTS Dashboard PRODUCTION (Proxy + Prefetch Edition)");
+  console.log(" RCA IELTS Dashboard (Direct Connection Edition)");
   console.log(" URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
   console.log(" Modes: / (Home) | /single (1 User) | /bulk (5 Users)");
-  console.log(" Proxies: " + PROXY_POOL.length + " configured (rotating + fallback)");
+  console.log(" Connection: Direct (No Proxy)");
   console.log("=".repeat(60));
 });
