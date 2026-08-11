@@ -1,0 +1,27 @@
+{
+13:13:37.530
+    "$schema": "node_modules/wrangler/config-schema.json",
+13:13:37.530
+    "name": "rcascript",
+13:13:37.530
+    "compatibility_date": "2026-08-11",
+13:13:37.530
+    "observability": {
+13:13:37.530
+      "enabled": true
+13:13:37.530
+    },
+13:13:37.530
+    "assets": {
+13:13:37.530
+      "directory": "."
+13:13:37.530
+    },
+13:13:37.531
+    "compatibility_flags": [
+13:13:37.540
+      "nodejs_compat"
+13:13:37.540
+    ]
+13:13:37.541
+  }
