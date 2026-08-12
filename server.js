@@ -135,6 +135,41 @@ const SKILLS = [
   { key: "READING", name: "Reading", icon: "fa-book-open" },
 ];
 
+function detectLessonSkill(lesson) {
+  const candidates = [
+    lesson.summarySkill, lesson.skill, lesson.skillName,
+    lesson.activitySkill, lesson.lessonSkill, lesson.category, lesson.type, lesson.skillType
+  ];
+  for (const val of candidates) {
+    if (val == null) continue;
+    const upper = String(val).toUpperCase();
+    for (const s of SKILLS) { if (s.key === upper || s.name.toUpperCase() === upper) return s.key; }
+    if (upper.includes("SPEAK")) return "SPEAKING";
+    if (upper.includes("LISTEN")) return "LISTENING";
+    if (upper.includes("READ")) return "READING";
+    if (upper.includes("WRITE") || upper.includes("ESSAY")) return "WRITING";
+  }
+  const name = String(lesson.lessonName || lesson.name || "").toUpperCase();
+  if (name.includes("SPEAK")) return "SPEAKING";
+  if (name.includes("LISTEN")) return "LISTENING";
+  if (name.includes("READ")) return "READING";
+  if (name.includes("WRITE") || name.includes("ESSAY")) return "WRITING";
+  return "SPEAKING";
+}
+
+function detectLessonCompletion(lesson) {
+  if (lesson.isCompleted === true || lesson.completed === true) return true;
+  if (lesson.progress === 100 || lesson.progress === "100") return true;
+  const fields = [lesson.lessonCompletionStatus, lesson.completionStatus, lesson.status, lesson.activityState, lesson.lessonStatus, lesson.state];
+  for (const val of fields) {
+    if (val === true) return true;
+    if (val == null || val === false) continue;
+    const upper = String(val).toUpperCase();
+    if (["COMPLETED","DONE","FINISHED","SUBMITTED","COMPLETE","PASSED","SUCCESS"].includes(upper)) return true;
+  }
+  return false;
+}
+
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, "public");
 const jobs = new Map();
@@ -452,7 +487,7 @@ const SECTIONS = {
 
           const unitLessons = [];
           for (const lesson of lessons || []) {
-            const skillKey = lesson.summarySkill || "SPEAKING";
+            const skillKey = detectLessonSkill(lesson);
             if (!allSkills[skillKey]) {
               allSkills[skillKey] = {
                 name: skillKey,
@@ -466,8 +501,17 @@ const SECTIONS = {
               };
             }
 
-            const actId = lesson.activitySetId;
-            const isComplete = lesson.lessonCompletionStatus === "COMPLETED" || lesson.lessonCompletionStatus === "DONE";
+            const actId = lesson.activitySetId || lesson.activitySetID || lesson.activityId;
+            const isComplete = detectLessonCompletion(lesson);
+
+            unitLessons.push({
+              lessonId: lesson.id,
+              lessonName: lesson.lessonName || lesson.name || "Lesson " + lesson.lessonNumber,
+              activitySetId: actId || null,
+              skillKey,
+              isCompleted: isComplete,
+              status: isComplete ? "COMPLETED" : "NEW",
+            });
 
             if (actId) {
               allSkills[skillKey].activitySetIds.push(String(actId));
@@ -480,15 +524,6 @@ const SECTIONS = {
                 activitySetId: actId,
                 isCompleted: isComplete,
                 lessonName: lesson.lessonName || lesson.name || "Lesson " + lesson.lessonNumber,
-              });
-
-              unitLessons.push({
-                lessonId: lesson.id,
-                lessonName: lesson.lessonName || lesson.name || "Lesson " + lesson.lessonNumber,
-                activitySetId: actId,
-                skillKey,
-                isCompleted: isComplete,
-                status: isComplete ? "COMPLETED" : "NEW",
               });
             }
           }
@@ -577,7 +612,7 @@ const SECTIONS = {
       onLog && onLog("✓ Completed: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
-      await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger);
+      await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
     }
   },
 
@@ -704,7 +739,7 @@ const SECTIONS = {
       onLog && onLog("✓ Completed IELTS: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
-      await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger);
+      await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Ielts");
     }
   },
 };
@@ -778,7 +813,7 @@ async function submitActivity(token, activity, state, learnerId, loginId, client
   return payload;
 }
 
-async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, loginId, clientInfo, apiLogger) {
+async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, loginId, clientInfo, apiLogger, activityType = "Ielts") {
   try {
     await rcaRequest("POST", "/update-user-time-taken", {
       token,
@@ -787,7 +822,7 @@ async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, 
         activitySetId: String(activitySetId),
         timeInSecs: String(secs),
         learnerId: String(learnerId),
-        activityType: "Ielts",
+        activityType: activityType,
       },
       body: "",
       loginId,
