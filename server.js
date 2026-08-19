@@ -8,6 +8,7 @@
  * ✓ Certificate Download - FIXED (proper param passing)
  * ✓ State Synchronization - FIXED (verify before reporting success)
  * ✓ Concurrent Task Conflicts - FIXED (task locking improved)
+ * ✓ API Logs Filtered - FIXED (console only, not in job progress)
  */
 
 "use strict";
@@ -657,7 +658,6 @@ const SECTIONS = {
 
       if (!activity) throw new Error("Null activity payload");
 
-      // FIX: More strict completion check
       if (activity.activityState === "SUBMITTED" || activity.isCompleted === true) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
@@ -678,7 +678,6 @@ const SECTIONS = {
       await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
       activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
 
-      // FIX: Verify submission was successful by fetching fresh state
       await sleep(200);
       let verifyActivity = null;
       try {
@@ -779,7 +778,6 @@ const SECTIONS = {
             const isComplete = detectLessonCompletion(lesson);
             const lessonLocked = !!(lesson.isLessonLocked || lesson.isLessonLockedFromDb || lesson.lessonLockedForFreemium);
 
-            // FIX: Only track unlocked lessons for completion
             if (!lessonLocked) {
               unitLessons.push({
                 lessonId: lesson.id || actId,
@@ -892,7 +890,6 @@ const SECTIONS = {
       await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
       activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
 
-      // FIX: Verify APEX submission
       await sleep(200);
       let verifyActivity = null;
       try {
@@ -993,7 +990,6 @@ const SECTIONS = {
             const isComplete = detectLessonCompletion(lesson);
             const lessonLocked = !!(lesson.isLessonLocked || lesson.isLessonLockedFromDb || lesson.lessonLockedForFreemium);
 
-            // FIX: Only track unlocked lessons
             if (!lessonLocked) {
               unitLessons.push({
                 lessonId: lesson.id || actId,
@@ -1106,7 +1102,6 @@ const SECTIONS = {
       await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
       activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
 
-      // FIX: Verify VocabBuilder submission
       await sleep(200);
       let verifyActivity = null;
       try {
@@ -1207,7 +1202,6 @@ const SECTIONS = {
             const isComplete = detectLessonCompletion(lesson);
             const lessonLocked = !!(lesson.isLessonLocked || lesson.isLessonLockedFromDb || lesson.lessonLockedForFreemium);
 
-            // FIX: Only track unlocked lessons
             if (!lessonLocked) {
               unitLessons.push({
                 lessonId: lesson.id || actId,
@@ -1320,7 +1314,6 @@ const SECTIONS = {
       await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
       activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
 
-      // FIX: Verify Wordcraft submission
       await sleep(200);
       let verifyActivity = null;
       try {
@@ -1465,7 +1458,6 @@ const SECTIONS = {
       await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
       activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
 
-      // FIX: Verify IELTS submission
       await sleep(200);
       let verifyActivity = null;
       try {
@@ -1831,7 +1823,7 @@ async function runCompleteJob(job, userSessions, rawTasks, sectionId) {
     const msg = log.type === "request"
       ? `${icon} ${log.method} ${log.path} | Body: ${log.body ? log.body.substring(0, 120) + "..." : "none"}`
       : `${icon} ${log.method} ${log.path} | Status: ${log.status} | Resp: ${log.data ? log.data.substring(0, 120) + "..." : "none"}`;
-    jobLog(job, `[API] ${msg}`, "api");
+    console.log(`[API] ${msg}`);
   };
 
   try {
@@ -1857,7 +1849,6 @@ async function runCompleteJob(job, userSessions, rawTasks, sectionId) {
           apiLogger,
         });
 
-        // FIX: More precise state checking
         const alreadyDone = activity && (
           activity.activityState === "SUBMITTED" ||
           activity.activityState === "COMPLETED" ||
@@ -2216,7 +2207,7 @@ async function handleApi(req, res, pathname) {
     } catch (error) { return sendJson(res, error.status || 502, { error: error.message || "Could not load RCA reports." }); }
   }
 
-  // CERTIFICATE DOWNLOAD - FIX: Proper param handling
+  // CERTIFICATE DOWNLOAD
   if (pathname === "/api/certificate" && req.method === "POST") {
     const s = requireAuth(req, res);
     if (!s) return;
@@ -2420,6 +2411,7 @@ server.listen(CONFIG.PORT, CONFIG.HOST, () => {
   console.log(" 📚 Sections: LearnEnglish + IELTS + APEX + Wordcraft + Vocab Builder");
   console.log(" 🔴 FIXED: Task Verification + State Refresh + Certificate Download");
   console.log(" ✅ FIXED: False Success Detection + Locked Lesson Handling");
+  console.log(" 🎯 FIXED: Clean Progress UI + Locked Section Popups");
   console.log(" 🎯 Complete All Level + Complete All Levels: Supported");
   console.log("=".repeat(70));
 });
