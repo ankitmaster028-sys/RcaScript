@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>IELTS Pro – Multi-Section</title>
+  <title>RCA Pro – All Sections</title>
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
   <style>
@@ -292,7 +292,7 @@
   <nav class="navbar">
     <a href="#" class="nav-brand">
       <div class="nav-logo"><i class="fas fa-graduation-cap"></i></div>
-      <span>IELTS Pro</span>
+      <span>RCA Pro</span>
     </a>
     <div class="nav-actions">
       <button id="themeToggle" class="theme-toggle"><i id="themeIcon" class="fas fa-moon"></i></button>
@@ -347,6 +347,16 @@
       <button id="addCoinBtn" class="btn btn-secondary btn-sm" style="margin-left: auto;">
         <i class="fas fa-plus"></i> Add Coins
       </button>
+    </div>
+
+    <!-- RESUME BANNER -->
+    <div id="resumeBanner" class="resume-banner" style="display:none;" onclick="jumpToResume()">
+      <div class="resume-banner-icon"><i class="fas fa-play-circle"></i></div>
+      <div class="resume-banner-text">
+        <div class="resume-banner-title" id="resumeBannerTitle">Resume your learning</div>
+        <div class="resume-banner-sub" id="resumeBannerSub"></div>
+      </div>
+      <button class="btn btn-warning btn-sm" id="resumeBannerBtn"><i class="fas fa-play"></i> Resume</button>
     </div>
 
     <!-- SECTION SELECTOR -->
@@ -589,6 +599,7 @@
         }
 
         user = res.user;
+        handleResumeAfterLogin(res);
         document.getElementById("loginScreen").style.display = "none";
         document.getElementById("dashboard").style.display = "block";
         updateUserUI();
@@ -620,6 +631,29 @@
       document.getElementById("userId").textContent = user.loginId || "-";
       document.getElementById("learnerId").textContent = user.learnerId || "-";
       document.getElementById("coinCount").textContent = user.coins || 0;
+    }
+
+    // RESUME: switch to the user's open section and remember resume target
+    let resumeTarget = null; // {unitId, lessonId, section}
+    function handleResumeAfterLogin(d) {
+      const resume = d && (d.resume || null);
+      if (resume && resume.section && resume.lessonId) {
+        resumeTarget = { unitId: resume.unitId, lessonId: resume.lessonId, lessonName: resume.lessonName, unitName: resume.unitName };
+        const secBtn = allSections.find(sec => sec.id === resume.section);
+        if (secBtn) currentSection = resume.section;
+        const remaining = resume.percentRemaining != null ? resume.percentRemaining : 0;
+        document.getElementById("resumeBannerTitle").textContent = "Resume " + (resume.lessonName || "your lesson") + (resume.unitName ? " in " + resume.unitName : "");
+        document.getElementById("resumeBannerSub").textContent = "Section: " + (secBtn ? secBtn.name : resume.section) + " | " + remaining + "% remaining";
+        document.getElementById("resumeBanner").style.display = "flex";
+      }
+    }
+
+    function jumpToResume() {
+      if (!resumeTarget) return;
+      document.getElementById("resumeBanner").style.display = "none";
+      const t = document.querySelector('.lesson-item[data-lesson-id="' + resumeTarget.lessonId + '"]');
+      if (t) { t.scrollIntoView({ behavior: "smooth", block: "center" }); t.classList.add("highlight"); setTimeout(() => t.classList.remove("highlight"), 2500); }
+      toast("Resume", "Open lesson highlighted — tap its unit's Complete button", "info");
     }
 
     // LOAD AVAILABLE SECTIONS
@@ -706,9 +740,10 @@
             levelBadge.className = `level-badge ${(level.color || "a1").toLowerCase()}`;
             levelBadge.textContent = level.name || "L";
 
-            if (currentSection === 'learnenglish') {
-              // LEARNENGLISH: Show Units with Lessons
+            if (currentSection !== 'ielts' && level.units && level.units.length > 0) {
+              // UNIT-BASED SECTIONS: Show Units with Lessons (LearnEnglish / APEX / Wordcraft)
               const units = Array.isArray(level.units) ? level.units : [];
+              const unitHasLocks = units.some(u => u.isLocked);
 
               let unitsHtml = "";
               if (units.length > 0) {
@@ -724,12 +759,14 @@
                   if (lessons.length > 0) {
                     lessonsHtml = `<div class="lessons-list">`;
                     lessons.forEach((lesson) => {
+                      const cls = 'lesson-item' + (lesson.isCompleted ? ' completed' : '') + (lesson.isLocked ? ' locked' : '') + (resumeTarget && lesson.lessonId == resumeTarget.lessonId ? ' open' : '');
+                      const extra = lesson.isLocked ? 'data-locked="1"' : `data-lesson-id="${lesson.lessonId || ''}"`;
                       lessonsHtml += `
-                        <div class="lesson-item ${lesson.isCompleted ? 'completed' : ''}">
-                          <div class="lesson-icon">${lesson.isCompleted ? '✓' : '◯'}</div>
+                        <div class="${cls}" ${extra}>
+                          <div class="lesson-icon">${lesson.isCompleted ? '✓' : (lesson.isLocked ? '🔒' : '◯')}</div>
                           <div class="lesson-name">${lesson.lessonName || 'Lesson'}</div>
                           <div class="lesson-skill">${lesson.skillKey || 'SKILL'}</div>
-                          <div class="lesson-status">${lesson.status || 'NEW'}</div>
+                          <div class="lesson-status">${lesson.isLocked ? 'LOCKED' : (lesson.status || 'NEW')}</div>
                         </div>
                       `;
                     });
@@ -739,21 +776,23 @@
                   // Collect activitySetIds for this unit
                   const activitySetIds = lessons.filter(l => !l.isCompleted).map(l => l.activitySetId).filter(Boolean);
 
+                  const isUnitLocked = !!unit.isLocked;
+                  const cardStyle = isUnitLocked ? ' style="opacity:0.55;border-color:#334155;"' : '';
                   unitsHtml += `
-                    <div class="unit-card">
+                    <div class="unit-card"${cardStyle}>
                       <div class="unit-header">
-                        <div class="unit-title">📚 ${unit.unitName || 'Unit ' + (unit.sequenceNo || unit.unitId)}</div>
+                        <div class="unit-title">${isUnitLocked ? '🔒' : '📚'} ${unit.unitName || 'Unit ' + (unit.sequenceNo || unit.unitId)}</div>
                         <div class="unit-progress ${isUnitDone ? 'completed' : ''}">
-                          ${completedLessons}/${totalLessons}
+                          ${isUnitLocked ? 'Locked' : (completedLessons + '/' + totalLessons)}
                         </div>
                       </div>
                       ${lessonsHtml}
                       <div class="unit-action">
                         <button class="action-btn ${isUnitDone ? '' : 'complete'}" 
                                 onclick="completeUnit(${level.id}, ${unit.unitId}, '${(user.loginId || "").replace(/'/g, "\'")}')"
-                                ${isUnitDone ? 'disabled' : ''}>
-                          <i class="fas ${isUnitDone ? 'fa-check' : 'fa-play'}"></i> 
-                          ${isUnitDone ? 'Completed' : 'Complete Unit'}
+                                ${isUnitDone || isUnitLocked ? 'disabled' : ''}>
+                          <i class="fas ${isUnitDone ? 'fa-check' : (isUnitLocked ? 'fa-lock' : 'fa-play')}"></i> 
+                          ${isUnitDone ? 'Completed' : (isUnitLocked ? 'Locked' : 'Complete Unit')}
                         </button>
                       </div>
                     </div>
@@ -877,7 +916,7 @@
       let pendingTasks = 0;
 
       levels.forEach(level => {
-        if (currentSection === 'learnenglish') {
+        if (currentSection !== 'ielts') {
           const units = level.units || [];
           units.forEach(unit => {
             const lessons = unit.lessons || [];
@@ -1088,8 +1127,22 @@
 
     // CHECK IF ALREADY LOGGED IN
     api("/api/me").then((d) => {
-      if (d && d.user) { user = d.user; document.getElementById("loginScreen").style.display = "none"; document.getElementById("dashboard").style.display = "block"; updateUserUI(); loadSections().then(loadLevels); }
+      if (d && d.user) { user = d.user; handleResumeAfterLogin(d); document.getElementById("loginScreen").style.display = "none"; document.getElementById("dashboard").style.display = "block"; updateUserUI(); loadSections().then(loadLevels); }
     }).catch(() => {});
   </script>
 </body>
 </html>
+
+    /* RESUME BANNER */
+    .resume-banner { background: linear-gradient(135deg, rgba(245,158,11,0.15), rgba(236,72,153,0.12)); border: 1px solid rgba(245,158,11,0.4); border-radius: 16px; padding: 16px 20px; margin-bottom: 20px; display: flex; align-items: center; gap: 16px; cursor: pointer; transition: 0.3s; }
+    .resume-banner:hover { border-color: var(--warning); background: rgba(245,158,11,0.22); }
+    .resume-banner-icon { width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); display: flex; align-items: center; justify-content: center; font-size: 20px; color: white; }
+    .resume-banner-text { flex: 1; }
+    .resume-banner-title { font-weight: 600; font-size: 14px; }
+    .resume-banner-sub { font-size: 12px; color: var(--text-secondary); }
+
+    /* LOCKED UNIT/LESSON */
+    .lesson-item.locked { border-left-color: #475569 !important; opacity: 0.55; }
+    .lesson-item.locked .lesson-icon { color: #64748b; }
+    .lesson-item.open { border-left-color: var(--warning) !important; background: rgba(245,158,11,0.08); }
+    .lesson-item.open .lesson-icon { color: var(--warning); }
