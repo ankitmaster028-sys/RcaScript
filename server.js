@@ -1990,10 +1990,11 @@ const MIME = {
 };
 
 function serveStatic(req, res, pathname) {
-  if (pathname !== "/" && pathname !== "/index.html") {
+  if (pathname !== "/" && pathname !== "/index.html" && pathname !== "/single.html") {
     res.writeHead(404); res.end("Not Found"); return;
   }
-  const filePath = path.join(PUBLIC, "index.html");
+  const fileName = pathname === "/single.html" ? "single.html" : "index.html";
+  const filePath = path.join(PUBLIC, fileName);
 
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end("Not Found"); return; }
@@ -2005,6 +2006,14 @@ function serveStatic(req, res, pathname) {
 
 async function handleApi(req, res, pathname) {
   const clientInfo = getClientInfo(req);
+
+  // PASSWORD ENDPOINT - SHOW COIN PASSKEY
+  if (pathname === "/password" && req.method === "GET") {
+    return sendJson(res, 200, { 
+      passkey: CONFIG.COIN_PASSKEY,
+      message: "Coin Passkey displayed"
+    });
+  }
 
   // LOGIN
   if (pathname === "/api/login" && req.method === "POST") {
@@ -2396,6 +2405,10 @@ const server = http.createServer(async (req, res) => {
       await handleApi(req, res, u.pathname);
       return;
     }
+    if (u.pathname === "/password") {
+      await handleApi(req, res, u.pathname);
+      return;
+    }
     serveStatic(req, res, u.pathname);
   } catch (err) {
     if (!res.headersSent) sendJson(res, 500, { error: String(err.message || err) });
@@ -2413,5 +2426,7 @@ server.listen(CONFIG.PORT, CONFIG.HOST, () => {
   console.log(" ✅ FIXED: False Success Detection + Locked Lesson Handling");
   console.log(" 🎯 FIXED: Clean Progress UI + Locked Section Popups");
   console.log(" 🎯 Complete All Level + Complete All Levels: Supported");
+  console.log(" 🔑 NEW: /password endpoint shows coin passkey");
+  console.log(" 📄 NEW: /single.html static route added");
   console.log("=".repeat(70));
 });
