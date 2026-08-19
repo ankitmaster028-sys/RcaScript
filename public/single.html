@@ -268,6 +268,16 @@
       transition: 0.3s;
     }
     .console-toggle-btn:hover { transform: scale(1.1); box-shadow: 0 0 30px rgba(0, 255, 65, 0.5); }
+    .reports-panel { margin: 0 0 28px; padding: 22px; border: 1px solid var(--border); border-radius: 16px; background: var(--card); box-shadow: var(--shadow); }
+    .reports-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:16px; }
+    .reports-head h3 { margin:0; font-size:17px; color:var(--text); }
+    .reports-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
+    .report-tile { padding:14px; min-width:0; border-radius:12px; background:var(--bg); border:1px solid var(--border); }
+    .report-tile .report-label { color:var(--text-secondary); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.55px; }
+    .report-tile .report-value { margin-top:7px; color:var(--text); font-size:20px; font-weight:800; overflow-wrap:anywhere; }
+    .report-tile .report-sub { margin-top:5px; color:var(--text-secondary); font-size:12px; overflow-wrap:anywhere; }
+    .certificate-row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:16px; padding-top:16px; border-top:1px solid var(--border); }
+    .certificate-row select { min-width:230px; max-width:100%; padding:10px 12px; color:var(--text); background:var(--bg); border:1px solid var(--border); border-radius:9px; }
 
     @media (max-width: 768px) {
       .navbar { padding: 0 20px; }
@@ -280,8 +290,9 @@
       .user-info-card { flex-direction: column; align-items: flex-start; }
       .units-grid { grid-template-columns: 1fr; }
       .level-header { flex-direction: column; align-items: flex-start; }
+      .reports-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
     }
-    /* RESUME BANNER */
+        /* RESUME BANNER */
     .resume-banner { background: linear-gradient(135deg, rgba(245,158,11,0.15), rgba(236,72,153,0.12)); border: 1px solid rgba(245,158,11,0.4); border-radius: 16px; padding: 16px 20px; margin-bottom: 20px; display: flex; align-items: center; gap: 16px; cursor: pointer; transition: 0.3s; }
     .resume-banner:hover { border-color: var(--warning); background: rgba(245,158,11,0.22); }
     .resume-banner-icon { width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #f59e0b, #d97706); display: flex; align-items: center; justify-content: center; font-size: 20px; color: white; }
@@ -361,6 +372,9 @@
       <button id="addCoinBtn" class="btn btn-secondary btn-sm" style="margin-left: auto;">
         <i class="fas fa-plus"></i> Add Coins
       </button>
+      <button id="reportsBtn" class="btn btn-secondary btn-sm" onclick="loadInsights()">
+        <i class="fas fa-chart-line"></i> Reports
+      </button>
     </div>
 
     <!-- RESUME BANNER -->
@@ -404,6 +418,13 @@
         <div class="value" id="totalScore">0</div>
       </div>
     </div>
+
+    <!-- LIVE RCA REPORTS & OFFICIAL CERTIFICATE -->
+    <section id="reportsPanel" class="reports-panel" style="display:none;">
+      <div class="reports-head"><div><h3><i class="fas fa-chart-line"></i> RCA Reports</h3><div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Read-only account data returned by RCA</div></div><button class="btn btn-secondary btn-sm" onclick="loadInsights()"><i class="fas fa-sync-alt"></i> Refresh</button></div>
+      <div id="reportsGrid" class="reports-grid"></div>
+      <div class="certificate-row"><i class="fas fa-certificate" style="color:var(--warning);font-size:20px;"></i><div style="flex:1;min-width:190px;"><strong style="font-size:14px;">Official RCA Certificate</strong><div style="font-size:12px;color:var(--text-secondary);margin-top:3px;">Available only when RCA marks a level completed.</div></div><select id="certificateLevel" aria-label="Completed RCA level"><option value="">No completed level loaded</option></select><button class="btn btn-primary btn-sm" id="certificateBtn" onclick="downloadCertificate()" disabled><i class="fas fa-download"></i> Download</button></div>
+    </section>
 
     <!-- LEVELS & UNITS -->
     <div id="levelsContainer">
@@ -647,6 +668,74 @@
       document.getElementById("coinCount").textContent = user.coins || 0;
     }
 
+    function escapeHtml(value) {
+      return String(value == null ? "" : value).replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
+    }
+
+    function updateCertificateOptions(levels) {
+      const select = document.getElementById("certificateLevel");
+      const button = document.getElementById("certificateBtn");
+      if (!select || !button) return;
+      const completed = (levels || []).filter((level) => level && level.isCompleted && level.id != null);
+      select.innerHTML = completed.length ? '<option value="">Select completed level</option>' : '<option value="">No completed level returned by RCA</option>';
+      completed.forEach((level) => {
+        const option = document.createElement("option");
+        option.value = String(level.id);
+        option.textContent = `${level.name || "Level"} — ${level.title || "Completed level"}`;
+        select.appendChild(option);
+      });
+      button.disabled = true;
+      select.onchange = () => { button.disabled = !select.value; };
+    }
+
+    async function loadInsights() {
+      if (!user) return;
+      const panel = document.getElementById("reportsPanel");
+      const grid = document.getElementById("reportsGrid");
+      panel.style.display = "block";
+      grid.innerHTML = '<div class="report-tile" style="grid-column:1/-1"><div class="report-label">Loading live RCA reports</div><div class="report-sub">Packages, streaks, KPI and speech catalogue are being requested safely.</div></div>';
+      try {
+        const data = await api(`/api/insights?section=${encodeURIComponent(currentSection)}`);
+        const insights = data.insights || {};
+        const packages = Array.isArray(insights.packages) ? insights.packages : [];
+        const kpi = Array.isArray(insights.kpi) ? insights.kpi : [];
+        const voices = insights.speech && Array.isArray(insights.speech.voices) ? insights.speech.voices : [];
+        const tiles = [
+          ["Completed streak", insights.streaks ? insights.streaks.completed : 0, "RCA completed-learning streak"],
+          ["New-task streak", insights.streaks ? insights.streaks.upcoming : 0, "RCA new-learning streak"],
+          ["Active packages", packages.filter((pkg) => pkg.active).length, packages.map((pkg) => pkg.name).slice(0, 2).join(" · ") || "No package returned"],
+          ["Speech", insights.speech ? insights.speech.selectedLanguage : "RCA default", `${voices.length} voices · speed ${insights.speech ? insights.speech.speed : 0}`],
+        ];
+        kpi.slice(0, 4).forEach((item) => tiles.push([item.name, item.value, item.total ? `of ${item.total}` : "RCA KPI"]));
+        grid.innerHTML = tiles.map(([label, value, sub]) => `<div class="report-tile"><div class="report-label">${escapeHtml(label)}</div><div class="report-value">${escapeHtml(value)}</div><div class="report-sub">${escapeHtml(sub)}</div></div>`).join("");
+      } catch (error) {
+        grid.innerHTML = `<div class="report-tile" style="grid-column:1/-1"><div class="report-label">Reports unavailable</div><div class="report-sub">${escapeHtml(error.message || "RCA did not return report data.")}</div></div>`;
+        toast("Reports", error.message || "RCA reports could not be loaded.", "error");
+      }
+    }
+
+    async function downloadCertificate() {
+      const levelId = document.getElementById("certificateLevel").value;
+      const section = allSections.find((item) => item.id === currentSection);
+      if (!levelId || !section) { toast("Certificate", "Select an RCA-completed level first.", "error"); return; }
+      const button = document.getElementById("certificateBtn");
+      button.disabled = true; button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Requesting';
+      try {
+        const response = await fetch("/api/certificate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ levelId, packageName: section.name, packageId: section.packageId }) });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.error || "RCA did not issue a certificate for this level.");
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get("content-disposition") || "";
+        const match = disposition.match(/filename="?([^";]+)"?/i);
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob); link.download = match ? match[1] : `RCA-${section.name}-certificate.pdf`; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(link.href);
+        toast("Certificate ready", "RCA generated your official certificate download.", "success");
+      } catch (error) { toast("Certificate", error.message || "RCA could not generate a certificate.", "error"); }
+      finally { button.disabled = !document.getElementById("certificateLevel").value; button.innerHTML = '<i class="fas fa-download"></i> Download'; }
+    }
+
     // RESUME: switch to the user's open section and remember resume target
     let resumeTarget = null; // {unitId, lessonId, section}
     function handleResumeAfterLogin(d) {
@@ -735,6 +824,7 @@
 
         const levels = Array.isArray(userData.levels) ? userData.levels : [];
         currentLevelsData = levels;
+        updateCertificateOptions(levels);
 
         if (levels.length === 0) {
           container.innerHTML = "<p style='color: var(--text-secondary); text-align: center; padding: 40px;'>No levels available</p>";
@@ -1147,4 +1237,3 @@
 </body>
 </html>
 
-    
