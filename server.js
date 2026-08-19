@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * RCA IELTS Dashboard – Optimized Edition (FIXED v3)
- * ✓ LearnEnglish Units/Lessons Fixed
- * ✓ Session Refresh (No Expiration on Long Tasks)
- * ✓ Fast Login with Real-time Feedback
- * ✓ Hide Empty 0/0 Activities
- * ✓ Lazy Load Section Data
- * ✓ Better Error Recovery
- * ✓ LearnEnglish: Per-Activity Completion Status
- * ✓ Live API Console Logging for Jobs
- * ✓ Complete All (Level) + Complete All Levels support
+ * RCA IELTS Dashboard â€“ Optimized Edition (FIXED v3)
+ * âœ“ LearnEnglish Units/Lessons Fixed
+ * âœ“ Session Refresh (No Expiration on Long Tasks)
+ * âœ“ Fast Login with Real-time Feedback
+ * âœ“ Hide Empty 0/0 Activities
+ * âœ“ Lazy Load Section Data
+ * âœ“ Better Error Recovery
+ * âœ“ LearnEnglish: Per-Activity Completion Status
+ * âœ“ Live API Console Logging for Jobs
+ * âœ“ Complete All (Level) + Complete All Levels support
  */
 
 "use strict";
@@ -172,7 +172,7 @@ function detectLessonCompletion(lesson) {
 }
 
 const ROOT = __dirname;
-const PUBLIC = path.join(ROOT, "public");
+const PUBLIC = ROOT;
 const jobs = new Map();
 
 function uuid() {
@@ -378,6 +378,79 @@ async function rcaRequest(method, apiPath, { token, body, query, loginId, client
   };
 
   return executeRequest(opts, payload, 1, isLogin, apiLogger);
+}
+
+// The official RCA certificate endpoint returns a binary PDF/document rather than JSON.
+// Keep this helper dependency-free while retaining cookie handling, TLS, and bounded retries.
+function rcaRequestBinary(method, apiPath, { token, body, query, loginId, clientInfo } = {}, isLogin = false) {
+  let pathStr = apiPath.startsWith("/") ? apiPath : "/" + apiPath;
+  if (query) {
+    const qs = new URLSearchParams(query).toString();
+    if (qs) pathStr += (pathStr.includes("?") ? "&" : "?") + qs;
+  }
+  const payload = body === undefined || body === null ? null : (typeof body === "string" ? body : JSON.stringify(body));
+  const headers = getRcaHeaders(token, loginId, clientInfo);
+  if (payload !== null) headers["Content-Length"] = Buffer.byteLength(payload);
+  const url = new URL(CONFIG.API_BASE + pathStr);
+  const opts = { hostname: url.hostname, port: url.port || 8443, path: url.pathname + url.search, method: method.toUpperCase(), headers, rejectUnauthorized: false, agent: httpsAgent };
+
+  const attempt = (number) => new Promise((resolve, reject) => {
+    const cookieHeader = getCookiesForHost(opts.hostname);
+    if (cookieHeader) opts.headers.Cookie = cookieHeader;
+    const request = https.request(opts, (response) => {
+      const cookies = parseCookies(response.headers);
+      if (cookies.length) storeCookies(opts.hostname, cookies);
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const bytes = Buffer.concat(chunks);
+        if (response.statusCode >= 400) {
+          const text = bytes.toString("utf8");
+          let data = null; try { data = JSON.parse(text); } catch (_) {}
+          const error = new Error((data && (data.message || data.error)) || text || `HTTP ${response.statusCode}`);
+          error.status = response.statusCode; error.data = data; reject(error); return;
+        }
+        const disposition = String(response.headers["content-disposition"] || "");
+        const match = disposition.match(/filename\*?=(?:UTF-8''|\")?([^;\"]+)/i);
+        resolve({ bytes, contentType: String(response.headers["content-type"] || "application/pdf"), filename: match ? decodeURIComponent(match[1].trim()) : null });
+      });
+    });
+    request.on("error", (error) => {
+      const retryable = ["ECONNABORTED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EPIPE", "ECONNREFUSED", "EAI_AGAIN"].some((code) => String(error.message).includes(code));
+      if (retryable && number < CONFIG.MAX_RETRIES) return sleep(CONFIG.RETRY_DELAY_MS * number).then(() => attempt(number + 1).then(resolve, reject));
+      reject(error);
+    });
+    request.setTimeout(isLogin ? CONFIG.LOGIN_TIMEOUT_MS : CONFIG.REQUEST_TIMEOUT_MS, () => request.destroy(new Error("Certificate request timed out")));
+    if (payload !== null) request.write(payload);
+    request.end();
+  });
+  return attempt(1);
+}
+
+function summarizeKpi(raw) {
+  const rows = Array.isArray(raw && raw.skillResultDto) ? raw.skillResultDto : (Array.isArray(raw && raw.data) ? raw.data : []);
+  return rows.slice(0, 12).map((item, index) => ({
+    name: String(item.skillName || item.skill || item.name || item.activitySkill || `Skill ${index + 1}`),
+    value: Number(item.percentage || item.score || item.result || item.completedActivities || item.totalEarnedScore || 0),
+    total: Number(item.total || item.totalActivities || item.totalQuestions || item.maximumScore || 0),
+  }));
+}
+
+async function accountInsights(user, section) {
+  // RCA permits one active token. These reads stay serial so an expired-token refresh cannot race itself.
+  const safeRead = async (fn, fallback) => { try { return await retryWithReauth(fn, user); } catch (_) { return fallback; } };
+  const packages = await safeRead(() => rcaRequest("GET", "/active-package-list", { token: user.accessToken, query: { studentAuthUserId: "0" }, loginId: user.loginId, clientInfo: user.clientInfo }), []);
+  const completed = await safeRead(() => rcaRequest("GET", "/learner-streaks", { token: user.accessToken, query: { learnerId: String(user.learnerId), type: "COMPLETED" }, loginId: user.loginId, clientInfo: user.clientInfo }), {});
+  const upcoming = await safeRead(() => rcaRequest("GET", "/learner-streaks", { token: user.accessToken, query: { learnerId: String(user.learnerId), type: "NEW" }, loginId: user.loginId, clientInfo: user.clientInfo }), {});
+  const kpi = await safeRead(() => rcaRequest("GET", "/lessons/result-kpi", { token: user.accessToken, query: { curriculumId: String(section.curriculumId) }, loginId: user.loginId, clientInfo: user.clientInfo }), {});
+  const speech = await safeRead(() => rcaRequest("GET", "/getGttsAndLanguages", { token: user.accessToken, loginId: user.loginId, clientInfo: user.clientInfo }), {});
+  const voices = Array.isArray(speech && speech.gttsVoiceTypeLists) ? speech.gttsVoiceTypeLists : [];
+  return {
+    packages: (Array.isArray(packages) ? packages : []).map((item) => ({ id: String(item.id || ""), name: String(item.packageName || item.name || "RCA package"), duration: String(item.duration || ""), purpose: String(item.coursePurpose || ""), active: item.isActive !== false })),
+    streaks: { completed: Number(completed.currentStreakCount || 0), upcoming: Number(upcoming.currentStreakCount || 0) },
+    kpi: summarizeKpi(kpi),
+    speech: { selectedLanguage: String(speech.userSelectedLanguage || "RCA default"), speed: Number(speech.speed || 0), voices: voices.slice(0, 24).map((item) => ({ id: String(item.id || ""), name: String(item.voiceName || item.voiceType || item.language || "RCA voice"), language: String(item.language || item.languageCode || "") })) },
+  };
 }
 
 // ==================== SESSION MANAGEMENT ====================
@@ -611,7 +684,7 @@ const SECTIONS = {
       await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
       activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
 
-      onLog && onLog("✓ Completed: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Completed: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
@@ -639,7 +712,7 @@ const SECTIONS = {
         return (data || []).map((l, idx) => ({
           id: l.id || idx,
           name: l.level || "L" + (idx + 1),
-          title: (l.level || "Level") + (l.nextLevel ? " → " + l.nextLevel : ""),
+          title: (l.level || "Level") + (l.nextLevel ? " â†’ " + l.nextLevel : ""),
           subtitle: "APEX Level",
           color: String(l.level || "").toLowerCase() || "a1",
           curriculumLevelMappingId: l.curriculumLevelMappingId,
@@ -807,7 +880,7 @@ const SECTIONS = {
       await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
       activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
 
-      onLog && onLog("✓ Completed: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Completed: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
@@ -835,7 +908,7 @@ const SECTIONS = {
         return (data || []).map((l, idx) => ({
           id: l.id || idx,
           name: l.level || "L" + (idx + 1),
-          title: (l.level || "Level") + (l.nextLevel ? " → " + l.nextLevel : ""),
+          title: (l.level || "Level") + (l.nextLevel ? " â†’ " + l.nextLevel : ""),
           subtitle: "Vocab Builder Level",
           color: String(l.level || "").toLowerCase() || "a1",
           curriculumLevelMappingId: l.curriculumLevelMappingId,
@@ -1003,7 +1076,7 @@ const SECTIONS = {
       await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
       activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
 
-      onLog && onLog("✓ Completed: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Completed: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
@@ -1031,7 +1104,7 @@ const SECTIONS = {
         return (data || []).map((l, idx) => ({
           id: l.id || idx,
           name: l.level || "L" + (idx + 1),
-          title: (l.level || "Level") + (l.nextLevel ? " → " + l.nextLevel : ""),
+          title: (l.level || "Level") + (l.nextLevel ? " â†’ " + l.nextLevel : ""),
           subtitle: "Wordcraft Level",
           color: String(l.level || "").toLowerCase() || "a1",
           curriculumLevelMappingId: l.curriculumLevelMappingId,
@@ -1199,7 +1272,7 @@ const SECTIONS = {
       await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
       activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
 
-      onLog && onLog("✓ Completed: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Completed: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
@@ -1327,7 +1400,7 @@ const SECTIONS = {
       await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
       activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
 
-      onLog && onLog("✓ Completed IELTS: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Completed IELTS: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Ielts");
@@ -1564,7 +1637,7 @@ function releaseSessionLock(loginId) {
 }
 async function ensureSessionValid(user) {
   if (!user.accessToken) throw new Error("No token");
-  // Bounded re-auth attempts — RCA allows only ONE active session per user,
+  // Bounded re-auth attempts â€” RCA allows only ONE active session per user,
   // so if the user is actively logged in on the RCA website we cannot hold a token.
   for (let i = 0; i < 2; i++) {
     try {
@@ -1575,7 +1648,7 @@ async function ensureSessionValid(user) {
       const isExpiry = SESSION_EXPIRY_HINTS.some((h) => msg.includes(h)) || (e && (e.status === 401 || e.status === 403));
       if (!isExpiry) throw e;
       if (i === 0) {
-        console.log(`[Session] Token invalidated for ${user.loginId} — re-authenticating...`);
+        console.log(`[Session] Token invalidated for ${user.loginId} â€” re-authenticating...`);
         const u = await rcaLogin(user.loginId, "", user.clientInfo);
         user.accessToken = u.accessToken;
         user.learnerId = u.learnerId || user.learnerId;
@@ -1588,7 +1661,7 @@ async function ensureSessionValid(user) {
         console.log(`[Session] Re-authenticated ${user.loginId}`);
       } else {
         // Second attempt still failed (user likely active on the RCA website).
-        throw new Error("Session busy on another device — try again shortly");
+        throw new Error("Session busy on another device â€” try again shortly");
       }
     }
   }
@@ -1687,7 +1760,7 @@ async function runCompleteJob(job, userSessions, rawTasks, sectionId) {
 
   // API Logger for live console
   const apiLogger = (log) => {
-    const icon = log.type === "request" ? "→" : "←";
+    const icon = log.type === "request" ? "â†’" : "â†";
     const msg = log.type === "request"
       ? `${icon} ${log.method} ${log.path} | Body: ${log.body ? log.body.substring(0, 120) + "..." : "none"}`
       : `${icon} ${log.method} ${log.path} | Status: ${log.status} | Resp: ${log.data ? log.data.substring(0, 120) + "..." : "none"}`;
@@ -1740,7 +1813,7 @@ async function runCompleteJob(job, userSessions, rawTasks, sectionId) {
 
     if (pendingTasks.length === 0) {
       job.status = "done";
-      job.task = "All tasks already completed ✓";
+      job.task = "All tasks already completed âœ“";
       job.finishedAt = Date.now();
       jobLog(job, "No pending tasks", "warn");
       return;
@@ -1791,7 +1864,7 @@ async function runCompleteJob(job, userSessions, rawTasks, sectionId) {
                 await submitActivity(t.session.accessToken, fresh, "SUBMITTED", t.session.learnerId, t.session.loginId, t.session.clientInfo, apiLogger);
                 const lessonId = fresh.lessonId || t.activitySetId;
                 await updateTimeTaken(t.session.accessToken, t.session.learnerId, lessonId, t.activitySetId, fresh.totalTimeTaken || 30, t.session.loginId, t.session.clientInfo, apiLogger, section.activityType || "Lesson");
-                jobLog(job, `[${t.userName}] ✓ Conflict resolved, submitted: ${t.activitySetId}`, "success");
+                jobLog(job, `[${t.userName}] âœ“ Conflict resolved, submitted: ${t.activitySetId}`, "success");
               }
             } catch (recErr) {
               jobLog(job, `[${t.userName}] Conflict recovery failed: ${recErr.message}`, "error");
@@ -1807,7 +1880,7 @@ async function runCompleteJob(job, userSessions, rawTasks, sectionId) {
     }
 
     job.status = job.status === "cancelled" ? "cancelled" : "done";
-    job.task = `Completed ${pendingTasks.length} tasks ✓`;
+    job.task = `Completed ${pendingTasks.length} tasks âœ“`;
     job.finishedAt = Date.now();
   } catch (err) {
     job.status = "error";
@@ -1858,23 +1931,11 @@ const MIME = {
   ".ico": "image/x-icon"
 };
 
-const ROUTES = {
-  "/": "index.html",
-  "/single": "single.html",
-  "/bulk": "bulk.html"
-};
-
 function serveStatic(req, res, pathname) {
-  let filePath;
-  if (ROUTES[pathname]) {
-    filePath = path.join(PUBLIC, ROUTES[pathname]);
-  } else {
-    filePath = path.resolve(PUBLIC, pathname.replace(/^\/+/, ""));
+  if (pathname !== "/" && pathname !== "/index.html") {
+    res.writeHead(404); res.end("Not Found"); return;
   }
-
-  if (!filePath.startsWith(path.resolve(PUBLIC))) {
-    res.writeHead(403); res.end("Access Denied"); return;
-  }
+  const filePath = path.join(PUBLIC, "index.html");
 
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end("Not Found"); return; }
@@ -1893,7 +1954,7 @@ async function handleApi(req, res, pathname) {
     const password = body.password || CONFIG.APP_PASSWORD;
     const loginIdRaw = String(body.loginId || "").trim();
     const isBulk = body.bulk === true;
-    const loginIds = loginIdRaw.split(/,|，/).map((id) => id.trim()).filter(Boolean);
+    const loginIds = loginIdRaw.split(/,|ï¼Œ/).map((id) => id.trim()).filter(Boolean);
 
     if (!loginIds.length) return sendJson(res, 400, { error: "Enter User ID" });
     if (isBulk && loginIds.length > CONFIG.MAX_BULK_USERS) {
@@ -2075,6 +2136,45 @@ async function handleApi(req, res, pathname) {
     }
   }
 
+  // READ-ONLY REPORTS (packages, streaks, KPI and RCA voice catalogue)
+  if (pathname === "/api/insights" && req.method === "GET") {
+    const s = requireAuth(req, res);
+    if (!s) return;
+    const user = s.users[0];
+    const url = new URL(req.url, "http://localhost");
+    const sectionId = url.searchParams.get("section") || (user.resumeInfo && user.resumeInfo.section) || "learnenglish";
+    const section = SECTIONS[sectionId];
+    if (!section) return sendJson(res, 400, { error: "Invalid section" });
+    try {
+      const insights = await runWithUserLock(user.loginId, () => accountInsights(user, section));
+      const refreshed = { users: s.users, createdAt: s.createdAt };
+      setSessionCookie(res, encryptSession(refreshed));
+      return sendJson(res, 200, { section: { id: section.id, name: section.name }, insights, fetchedAt: Date.now() });
+    } catch (error) { return sendJson(res, error.status || 502, { error: error.message || "Could not load RCA reports." }); }
+  }
+
+  // OFFICIAL RCA CERTIFICATE DOWNLOAD â€” only RCA can decide eligibility and generate the file.
+  if (pathname === "/api/certificate" && req.method === "POST") {
+    const s = requireAuth(req, res);
+    if (!s) return;
+    const user = s.users[0];
+    const body = await readJson(req);
+    const levelId = body.levelId == null ? "" : String(body.levelId).trim();
+    const packageName = String(body.packageName || "").trim();
+    const packageId = body.packageId == null ? "" : String(body.packageId).trim();
+    if (!levelId || !packageName || !packageId || packageName.length > 160) return sendJson(res, 400, { error: "levelId, packageName and packageId are required." });
+    try {
+      const file = await runWithUserLock(user.loginId, () => retryWithReauth(() => rcaRequestBinary("POST", "/generate-certificate", { token: user.accessToken, query: { levelId, packageName, packageId }, body: {}, loginId: user.loginId, clientInfo: user.clientInfo }), user));
+      const fallback = `RCA-${packageName.replace(/[^\w-]+/g, "-")}-certificate.pdf`;
+      const fileName = file.filename && /^[\w.,() -]+$/.test(file.filename) ? file.filename : fallback;
+      res.statusCode = 200;
+      res.setHeader("Content-Type", file.contentType);
+      res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+      res.setHeader("Cache-Control", "no-store");
+      return res.end(file.bytes);
+    } catch (error) { return sendJson(res, error.status || 502, { error: error.message || "RCA could not generate a certificate for this level." }); }
+  }
+
   // ADD COINS
   if (pathname === "/api/coins" && req.method === "POST") {
     const s = requireAuth(req, res);
@@ -2184,7 +2284,7 @@ async function handleApi(req, res, pathname) {
       }
     }
 
-    const job = createJob(mode, { mode, userCount: targetUsers.length, section });
+    const job = createJob(mode, { mode, userCount: targetUsers.length, section, ownerLoginId: s.users[0].loginId });
     setImmediate(() => runCompleteJob(job, targetUsers, rawTasks, section));
 
     return sendJson(res, 200, {
@@ -2195,12 +2295,25 @@ async function handleApi(req, res, pathname) {
   }
 
   // JOB MONITORING
+  if (pathname === "/api/jobs" && req.method === "GET") {
+    const s = requireAuth(req, res);
+    if (!s) return;
+    const ownerLoginId = s.users[0].loginId;
+    const history = [...jobs.values()]
+      .filter((job) => job.meta && job.meta.ownerLoginId === ownerLoginId)
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .slice(0, 50)
+      .map((job) => ({ id: job.id, type: job.type, status: job.status, current: job.current, total: job.total, task: job.task, error: job.error, startedAt: job.startedAt, finishedAt: job.finishedAt, percent: job.total > 0 ? Math.round((job.current / job.total) * 100) : 0, logs: job.logs.slice(-20) }));
+    return sendJson(res, 200, { jobs: history });
+  }
+
   const jobMatch = pathname.match(/^\/api\/jobs\/([a-f0-9-]+)$/i);
   if (jobMatch && req.method === "GET") {
     const s = requireAuth(req, res);
     if (!s) return;
     const job = jobs.get(jobMatch[1]);
     if (!job) return sendJson(res, 404, { error: "Job not found" });
+    if (job.meta && job.meta.ownerLoginId && job.meta.ownerLoginId !== s.users[0].loginId) return sendJson(res, 404, { error: "Job not found" });
     return sendJson(res, 200, {
       id: job.id,
       status: job.status,
@@ -2232,12 +2345,12 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(CONFIG.PORT, CONFIG.HOST, () => {
   console.log("=".repeat(70));
-  console.log(" 🚀 RCA IELTS Dashboard (Optimized v3 - Live Console Edition)");
-  console.log(" 📍 URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
-  console.log(" 🔒 Session: 24h TTL + Auto-Refresh");
-  console.log(" ⚡ Connection: Keep-Alive + Smart Retry");
-  console.log(" 📚 Sections: LearnEnglish + IELTS + APEX + Wordcraft + Vocab Builder");
-  console.log(" 📡 Live API Console: Enabled");
-  console.log(" ✅ Complete All Level + Complete All Levels: Supported");
+  console.log(" ðŸš€ RCA IELTS Dashboard (Optimized v3 - Live Console Edition)");
+  console.log(" ðŸ“ URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
+  console.log(" ðŸ”’ Session: 24h TTL + Auto-Refresh");
+  console.log(" âš¡ Connection: Keep-Alive + Smart Retry");
+  console.log(" ðŸ“š Sections: LearnEnglish + IELTS + APEX + Wordcraft + Vocab Builder");
+  console.log(" ðŸ“¡ Live API Console: Enabled");
+  console.log(" âœ… Complete All Level + Complete All Levels: Supported");
   console.log("=".repeat(70));
 });
