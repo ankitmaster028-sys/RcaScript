@@ -160,6 +160,7 @@ function detectLessonSkill(lesson) {
 function detectLessonCompletion(lesson) {
   if (lesson.isCompleted === true || lesson.completed === true) return true;
   if (lesson.progress === 100 || lesson.progress === "100") return true;
+  if (lesson.lessonCompletionPercentage === 100 || lesson.lessonCompletionPercentage === "100") return true;
   const fields = [lesson.lessonCompletionStatus, lesson.completionStatus, lesson.status, lesson.activityState, lesson.lessonStatus, lesson.state];
   for (const val of fields) {
     if (val === true) return true;
@@ -566,6 +567,595 @@ const SECTIONS = {
 
         return { level: levelData, units: resultUnits, skills: allSkills, isCompleted: allDone };
       } catch (e) {
+        if (isAuthError(e)) throw e;
+        console.error("loadLevelData error:", e.message);
+        return { level: levelData, units: [], skills: {}, isCompleted: false };
+      }
+    },
+
+    completeActivity: async (session, activitySetId, onLog, apiLogger) => {
+      const token = session.accessToken;
+      const learnerId = session.learnerId;
+      const loginId = session.loginId;
+      const clientInfo = session.clientInfo;
+      const ts = Date.now();
+
+      onLog && onLog("Fetching activity: " + activitySetId, "info");
+
+      let activity = await rcaRequest("GET", `/activitySetDetails/${activitySetId}/0/${ts}/false`, {
+        token,
+        loginId,
+        clientInfo,
+        apiLogger,
+      });
+
+      if (!activity) throw new Error("Null activity payload");
+
+      if (activity.activityState === "SUBMITTED" || activity.isCompleted === true) {
+        onLog && onLog("Already completed: " + activitySetId, "warn");
+        return { skipped: true, activitySetId, reason: "already_completed" };
+      }
+
+      const allQuestions = activity.activityQuestionDetailsList || [];
+      const allAlreadyCorrect = allQuestions.length > 0 && allQuestions.every(q => q.isUserAnswerCorrect === true && q.userAnswer != null);
+      if (allAlreadyCorrect) {
+        onLog && onLog("All questions correct: " + activitySetId, "warn");
+        return { skipped: true, activitySetId, reason: "all_questions_done" };
+      }
+
+      activity = fillAnswers(activity);
+      activity.activityState = "INPROGRESS";
+      activity.learnerId = learnerId;
+      activity.startDate = Date.now() - 25000;
+
+      await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
+      activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
+
+      onLog && onLog("✓ Completed: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+
+      const lessonId = activity.lessonId || activitySetId;
+      await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
+    }
+  },
+
+  apex: {
+    id: "apex",
+    name: "APEX",
+    description: "Advanced vocabulary & skills mastery",
+    curriculumId: 105,
+    packageId: 47,
+    packageSuffix: 47,
+    standardLevelId: 8,
+    activityType: "Lesson",
+
+    getUserLevels: async (token, loginId, clientInfo) => {
+      try {
+        const data = await rcaRequest("GET", "/userLevels", {
+          token,
+          query: { studentAuthUserId: "0", standardLevelId: "8", curriculumId: "105" },
+          loginId,
+          clientInfo,
+        });
+        return (data || []).map((l, idx) => ({
+          id: l.id || idx,
+          name: l.level || "L" + (idx + 1),
+          title: (l.level || "Level") + (l.nextLevel ? " → " + l.nextLevel : ""),
+          subtitle: "APEX Level",
+          color: String(l.level || "").toLowerCase() || "a1",
+          curriculumLevelMappingId: l.curriculumLevelMappingId,
+          standardLevelId: l.id,
+          userLevelData: l,
+        }));
+      } catch (e) {
+        console.error("getUserLevels error:", e.message);
+        return [];
+      }
+    },
+
+    loadLevelData: async (token, levelData, loginId, clientInfo) => {
+      try {
+        const mappingId = levelData.curriculumLevelMappingId;
+        const stdLevel = String(levelData.standardLevelId || levelData.id || 8);
+        const units = await rcaRequest("GET", "/units", {
+          token,
+          query: { curriculumLevelMappingId: mappingId, packageId: "47" },
+          loginId,
+          clientInfo,
+        });
+
+        const resultUnits = [];
+        const allSkills = {};
+        const ts = Date.now();
+
+        for (const unit of units || []) {
+          const unitId = unit.id;
+          const lessons = await rcaRequest("GET", `/lessons/unit/${unitId}/${stdLevel}/false/${ts}/${47}`, {
+            token,
+            loginId,
+            clientInfo,
+          });
+
+          const unitLessons = [];
+          for (const lesson of lessons || []) {
+            const skillKey = detectLessonSkill(lesson);
+            if (!allSkills[skillKey]) {
+              allSkills[skillKey] = {
+                name: skillKey,
+                completed: false,
+                score: 0,
+                totalActivities: 0,
+                completedActivities: 0,
+                time: "10",
+                activitySetIds: [],
+                activities: [],
+              };
+            }
+
+            const actId = lesson.activitySetId || lesson.id || null;
+            const isComplete = detectLessonCompletion(lesson);
+            // Lock flags on the LESSONS endpoint are authoritative (units endpoint
+            // returns stale global defaults), so derive lock state from the lesson itself.
+            const lessonLocked = !!(lesson.isLessonLocked || lesson.isLessonLockedFromDb || lesson.lessonLockedForFreemium);
+
+            unitLessons.push({
+              lessonId: lesson.id || actId,
+              lessonName: lesson.lessonName || lesson.name || "Lesson",
+              activitySetId: actId,
+              skillKey,
+              isCompleted: isComplete,
+              isLocked: lessonLocked,
+              status: isComplete ? "COMPLETED" : "NEW",
+            });
+
+            if (actId) {
+              allSkills[skillKey].activitySetIds.push(String(actId));
+              allSkills[skillKey].totalActivities++;
+              if (isComplete) {
+                allSkills[skillKey].completedActivities++;
+              }
+
+              allSkills[skillKey].activities.push({
+                activitySetId: actId,
+                isCompleted: isComplete,
+                lessonName: lesson.lessonName || lesson.name || "Lesson",
+              });
+            }
+          }
+
+          if (unitLessons.length > 0) {
+            resultUnits.push({
+              unitId: unitId,
+              unitName: unit.name || unit.unitName || "Unit " + (unit.sequenceNo || unitId),
+              sequenceNo: unit.sequenceNo || unitId,
+              isLocked: unitLessons.length > 0 && unitLessons.every((l) => l.isLocked),
+              completionStatus: unit.completionStatus || null,
+              completionPercentage: unit.completionPercentage != null ? Number(unit.completionPercentage) : null,
+              lessons: unitLessons,
+            });
+          }
+        }
+
+        let allDone = true;
+        for (const key of Object.keys(allSkills)) {
+          if (allSkills[key].completedActivities < allSkills[key].totalActivities) {
+            allDone = false;
+          }
+          if (allSkills[key].completedActivities === allSkills[key].totalActivities && allSkills[key].totalActivities > 0) {
+            allSkills[key].completed = true;
+          }
+        }
+
+        SKILLS.forEach((s) => {
+          if (!allSkills[s.key]) {
+            allSkills[s.key] = {
+              name: s.name,
+              completed: false,
+              score: 0,
+              totalActivities: 0,
+              completedActivities: 0,
+              time: "10",
+              activitySetIds: [],
+              activities: [],
+            };
+            allDone = false;
+          }
+        });
+
+        return { level: levelData, units: resultUnits, skills: allSkills, isCompleted: allDone };
+      } catch (e) {
+        if (isAuthError(e)) throw e;
+        console.error("loadLevelData error:", e.message);
+        return { level: levelData, units: [], skills: {}, isCompleted: false };
+      }
+    },
+
+    completeActivity: async (session, activitySetId, onLog, apiLogger) => {
+      const token = session.accessToken;
+      const learnerId = session.learnerId;
+      const loginId = session.loginId;
+      const clientInfo = session.clientInfo;
+      const ts = Date.now();
+
+      onLog && onLog("Fetching activity: " + activitySetId, "info");
+
+      let activity = await rcaRequest("GET", `/activitySetDetails/${activitySetId}/0/${ts}/false`, {
+        token,
+        loginId,
+        clientInfo,
+        apiLogger,
+      });
+
+      if (!activity) throw new Error("Null activity payload");
+
+      if (activity.activityState === "SUBMITTED" || activity.isCompleted === true) {
+        onLog && onLog("Already completed: " + activitySetId, "warn");
+        return { skipped: true, activitySetId, reason: "already_completed" };
+      }
+
+      const allQuestions = activity.activityQuestionDetailsList || [];
+      const allAlreadyCorrect = allQuestions.length > 0 && allQuestions.every(q => q.isUserAnswerCorrect === true && q.userAnswer != null);
+      if (allAlreadyCorrect) {
+        onLog && onLog("All questions correct: " + activitySetId, "warn");
+        return { skipped: true, activitySetId, reason: "all_questions_done" };
+      }
+
+      activity = fillAnswers(activity);
+      activity.activityState = "INPROGRESS";
+      activity.learnerId = learnerId;
+      activity.startDate = Date.now() - 25000;
+
+      await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
+      activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
+
+      onLog && onLog("✓ Completed: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+
+      const lessonId = activity.lessonId || activitySetId;
+      await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
+    }
+  },
+
+  vocabbuilder: {
+    id: "vocabbuilder",
+    name: "Vocab Builder",
+    description: "Vocabulary building program",
+    curriculumId: 125,
+    packageId: 50,
+    packageSuffix: 50,
+    standardLevelId: 8,
+    activityType: "Lesson",
+
+    getUserLevels: async (token, loginId, clientInfo) => {
+      try {
+        const data = await rcaRequest("GET", "/userLevels", {
+          token,
+          query: { studentAuthUserId: "0", standardLevelId: "8", curriculumId: "125" },
+          loginId,
+          clientInfo,
+        });
+        return (data || []).map((l, idx) => ({
+          id: l.id || idx,
+          name: l.level || "L" + (idx + 1),
+          title: (l.level || "Level") + (l.nextLevel ? " → " + l.nextLevel : ""),
+          subtitle: "Vocab Builder Level",
+          color: String(l.level || "").toLowerCase() || "a1",
+          curriculumLevelMappingId: l.curriculumLevelMappingId,
+          standardLevelId: l.id,
+          userLevelData: l,
+        }));
+      } catch (e) {
+        console.error("getUserLevels error:", e.message);
+        return [];
+      }
+    },
+
+    loadLevelData: async (token, levelData, loginId, clientInfo) => {
+      try {
+        const mappingId = levelData.curriculumLevelMappingId;
+        const stdLevel = String(levelData.standardLevelId || levelData.id || 8);
+        const units = await rcaRequest("GET", "/units", {
+          token,
+          query: { curriculumLevelMappingId: mappingId, packageId: "50" },
+          loginId,
+          clientInfo,
+        });
+
+        const resultUnits = [];
+        const allSkills = {};
+        const ts = Date.now();
+
+        for (const unit of units || []) {
+          const unitId = unit.id;
+          const lessons = await rcaRequest("GET", `/lessons/unit/${unitId}/${stdLevel}/false/${ts}/${50}`, {
+            token,
+            loginId,
+            clientInfo,
+          });
+
+          const unitLessons = [];
+          for (const lesson of lessons || []) {
+            const skillKey = detectLessonSkill(lesson);
+            if (!allSkills[skillKey]) {
+              allSkills[skillKey] = {
+                name: skillKey,
+                completed: false,
+                score: 0,
+                totalActivities: 0,
+                completedActivities: 0,
+                time: "10",
+                activitySetIds: [],
+                activities: [],
+              };
+            }
+
+            const actId = lesson.activitySetId || lesson.id || null;
+            const isComplete = detectLessonCompletion(lesson);
+            // Lock flags on the LESSONS endpoint are authoritative (units endpoint
+            // returns stale global defaults), so derive lock state from the lesson itself.
+            const lessonLocked = !!(lesson.isLessonLocked || lesson.isLessonLockedFromDb || lesson.lessonLockedForFreemium);
+
+            unitLessons.push({
+              lessonId: lesson.id || actId,
+              lessonName: lesson.lessonName || lesson.name || "Lesson",
+              activitySetId: actId,
+              skillKey,
+              isCompleted: isComplete,
+              isLocked: lessonLocked,
+              status: isComplete ? "COMPLETED" : "NEW",
+            });
+
+            if (actId) {
+              allSkills[skillKey].activitySetIds.push(String(actId));
+              allSkills[skillKey].totalActivities++;
+              if (isComplete) {
+                allSkills[skillKey].completedActivities++;
+              }
+
+              allSkills[skillKey].activities.push({
+                activitySetId: actId,
+                isCompleted: isComplete,
+                lessonName: lesson.lessonName || lesson.name || "Lesson",
+              });
+            }
+          }
+
+          if (unitLessons.length > 0) {
+            resultUnits.push({
+              unitId: unitId,
+              unitName: unit.name || unit.unitName || "Unit " + (unit.sequenceNo || unitId),
+              sequenceNo: unit.sequenceNo || unitId,
+              isLocked: unitLessons.length > 0 && unitLessons.every((l) => l.isLocked),
+              completionStatus: unit.completionStatus || null,
+              completionPercentage: unit.completionPercentage != null ? Number(unit.completionPercentage) : null,
+              lessons: unitLessons,
+            });
+          }
+        }
+
+        let allDone = true;
+        for (const key of Object.keys(allSkills)) {
+          if (allSkills[key].completedActivities < allSkills[key].totalActivities) {
+            allDone = false;
+          }
+          if (allSkills[key].completedActivities === allSkills[key].totalActivities && allSkills[key].totalActivities > 0) {
+            allSkills[key].completed = true;
+          }
+        }
+
+        SKILLS.forEach((s) => {
+          if (!allSkills[s.key]) {
+            allSkills[s.key] = {
+              name: s.name,
+              completed: false,
+              score: 0,
+              totalActivities: 0,
+              completedActivities: 0,
+              time: "10",
+              activitySetIds: [],
+              activities: [],
+            };
+            allDone = false;
+          }
+        });
+
+        return { level: levelData, units: resultUnits, skills: allSkills, isCompleted: allDone };
+      } catch (e) {
+        if (isAuthError(e)) throw e;
+        console.error("loadLevelData error:", e.message);
+        return { level: levelData, units: [], skills: {}, isCompleted: false };
+      }
+    },
+
+    completeActivity: async (session, activitySetId, onLog, apiLogger) => {
+      const token = session.accessToken;
+      const learnerId = session.learnerId;
+      const loginId = session.loginId;
+      const clientInfo = session.clientInfo;
+      const ts = Date.now();
+
+      onLog && onLog("Fetching activity: " + activitySetId, "info");
+
+      let activity = await rcaRequest("GET", `/activitySetDetails/${activitySetId}/0/${ts}/false`, {
+        token,
+        loginId,
+        clientInfo,
+        apiLogger,
+      });
+
+      if (!activity) throw new Error("Null activity payload");
+
+      if (activity.activityState === "SUBMITTED" || activity.isCompleted === true) {
+        onLog && onLog("Already completed: " + activitySetId, "warn");
+        return { skipped: true, activitySetId, reason: "already_completed" };
+      }
+
+      const allQuestions = activity.activityQuestionDetailsList || [];
+      const allAlreadyCorrect = allQuestions.length > 0 && allQuestions.every(q => q.isUserAnswerCorrect === true && q.userAnswer != null);
+      if (allAlreadyCorrect) {
+        onLog && onLog("All questions correct: " + activitySetId, "warn");
+        return { skipped: true, activitySetId, reason: "all_questions_done" };
+      }
+
+      activity = fillAnswers(activity);
+      activity.activityState = "INPROGRESS";
+      activity.learnerId = learnerId;
+      activity.startDate = Date.now() - 25000;
+
+      await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
+      activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
+
+      onLog && onLog("✓ Completed: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+
+      const lessonId = activity.lessonId || activitySetId;
+      await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
+    }
+  },
+
+  wordcraft: {
+    id: "wordcraft",
+    name: "Wordcraft",
+    description: "Wordcraft vocabulary course",
+    curriculumId: 106,
+    packageId: 90,
+    packageSuffix: 90,
+    standardLevelId: 8,
+    activityType: "Lesson",
+
+    getUserLevels: async (token, loginId, clientInfo) => {
+      try {
+        const data = await rcaRequest("GET", "/userLevels", {
+          token,
+          query: { studentAuthUserId: "0", standardLevelId: "8", curriculumId: "106" },
+          loginId,
+          clientInfo,
+        });
+        return (data || []).map((l, idx) => ({
+          id: l.id || idx,
+          name: l.level || "L" + (idx + 1),
+          title: (l.level || "Level") + (l.nextLevel ? " → " + l.nextLevel : ""),
+          subtitle: "Wordcraft Level",
+          color: String(l.level || "").toLowerCase() || "a1",
+          curriculumLevelMappingId: l.curriculumLevelMappingId,
+          standardLevelId: l.id,
+          userLevelData: l,
+        }));
+      } catch (e) {
+        console.error("getUserLevels error:", e.message);
+        return [];
+      }
+    },
+
+    loadLevelData: async (token, levelData, loginId, clientInfo) => {
+      try {
+        const mappingId = levelData.curriculumLevelMappingId;
+        const stdLevel = String(levelData.standardLevelId || levelData.id || 8);
+        const units = await rcaRequest("GET", "/units", {
+          token,
+          query: { curriculumLevelMappingId: mappingId, packageId: "90" },
+          loginId,
+          clientInfo,
+        });
+
+        const resultUnits = [];
+        const allSkills = {};
+        const ts = Date.now();
+
+        for (const unit of units || []) {
+          const unitId = unit.id;
+          const lessons = await rcaRequest("GET", `/lessons/unit/${unitId}/${stdLevel}/false/${ts}/${90}`, {
+            token,
+            loginId,
+            clientInfo,
+          });
+
+          const unitLessons = [];
+          for (const lesson of lessons || []) {
+            const skillKey = detectLessonSkill(lesson);
+            if (!allSkills[skillKey]) {
+              allSkills[skillKey] = {
+                name: skillKey,
+                completed: false,
+                score: 0,
+                totalActivities: 0,
+                completedActivities: 0,
+                time: "10",
+                activitySetIds: [],
+                activities: [],
+              };
+            }
+
+            const actId = lesson.activitySetId || lesson.id || null;
+            const isComplete = detectLessonCompletion(lesson);
+            // Lock flags on the LESSONS endpoint are authoritative (units endpoint
+            // returns stale global defaults), so derive lock state from the lesson itself.
+            const lessonLocked = !!(lesson.isLessonLocked || lesson.isLessonLockedFromDb || lesson.lessonLockedForFreemium);
+
+            unitLessons.push({
+              lessonId: lesson.id || actId,
+              lessonName: lesson.lessonName || lesson.name || "Lesson",
+              activitySetId: actId,
+              skillKey,
+              isCompleted: isComplete,
+              isLocked: lessonLocked,
+              status: isComplete ? "COMPLETED" : "NEW",
+            });
+
+            if (actId) {
+              allSkills[skillKey].activitySetIds.push(String(actId));
+              allSkills[skillKey].totalActivities++;
+              if (isComplete) {
+                allSkills[skillKey].completedActivities++;
+              }
+
+              allSkills[skillKey].activities.push({
+                activitySetId: actId,
+                isCompleted: isComplete,
+                lessonName: lesson.lessonName || lesson.name || "Lesson",
+              });
+            }
+          }
+
+          if (unitLessons.length > 0) {
+            resultUnits.push({
+              unitId: unitId,
+              unitName: unit.name || unit.unitName || "Unit " + (unit.sequenceNo || unitId),
+              sequenceNo: unit.sequenceNo || unitId,
+              isLocked: unitLessons.length > 0 && unitLessons.every((l) => l.isLocked),
+              completionStatus: unit.completionStatus || null,
+              completionPercentage: unit.completionPercentage != null ? Number(unit.completionPercentage) : null,
+              lessons: unitLessons,
+            });
+          }
+        }
+
+        let allDone = true;
+        for (const key of Object.keys(allSkills)) {
+          if (allSkills[key].completedActivities < allSkills[key].totalActivities) {
+            allDone = false;
+          }
+          if (allSkills[key].completedActivities === allSkills[key].totalActivities && allSkills[key].totalActivities > 0) {
+            allSkills[key].completed = true;
+          }
+        }
+
+        SKILLS.forEach((s) => {
+          if (!allSkills[s.key]) {
+            allSkills[s.key] = {
+              name: s.name,
+              completed: false,
+              score: 0,
+              totalActivities: 0,
+              completedActivities: 0,
+              time: "10",
+              activitySetIds: [],
+              activities: [],
+            };
+            allDone = false;
+          }
+        });
+
+        return { level: levelData, units: resultUnits, skills: allSkills, isCompleted: allDone };
+      } catch (e) {
+        if (isAuthError(e)) throw e;
         console.error("loadLevelData error:", e.message);
         return { level: levelData, units: [], skills: {}, isCompleted: false };
       }
@@ -693,6 +1283,7 @@ const SECTIONS = {
 
         return { level: levelData, units: [], skills, isCompleted: allDone };
       } catch (e) {
+        if (isAuthError(e)) throw e;
         console.error("loadLevelData error:", e.message);
         return { level: levelData, units: [], skills: {}, isCompleted: false };
       }
@@ -834,7 +1425,175 @@ async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, 
   }
 }
 
+// ==================== RESUME LEARNING ====================
+const PACKAGE_SECTION_MAP = {
+  "4": "learnenglish",
+  "5": "ielts",
+  "47": "apex",
+  "50": "vocabbuilder",
+  "90": "wordcraft",
+  "50": "vocabbuilder",
+};
+
+async function fetchResumeInfo(user) {
+  // Find the user's open/active lesson via resume-learning endpoint
+  const info = { section: null, unitId: null, unitName: null, lessonId: null, lessonName: null, percentRemaining: null, scenario: null, mappingId: null, standardLevelId: null, activitySetId: null };
+  try {
+    const details = await rcaRequest("POST", "/userDetails?inputKeywordList=0", { token: user.accessToken, body: "", loginId: user.loginId, clientInfo: user.clientInfo });
+    const packageId = String(details.packageId || "");
+    const mappingId = details.curriculumLevelMappingId;
+    const stdLevel = details.currentStandardLevel || 8;
+    const sectionId = PACKAGE_SECTION_MAP[packageId] || null;
+    if (!sectionId || !mappingId) return info;
+
+    info.section = sectionId;
+    info.mappingId = mappingId;
+    info.standardLevelId = stdLevel;
+
+    const section = SECTIONS[sectionId];
+    if (!section) return info;
+
+    const resume = await rcaRequest("GET", "/resume-learning", {
+      token: user.accessToken,
+      query: { curriculumLevelMappingId: String(mappingId), packageId: packageId, standardLevelId: String(stdLevel) },
+      loginId: user.loginId,
+      clientInfo: user.clientInfo,
+    });
+
+    if (resume && (resume.unitId != null || resume.lessonId != null)) {
+      info.unitId = resume.unitId;
+      info.unitName = resume.unitName || null;
+      info.lessonId = resume.lessonId;
+      info.lessonName = resume.lessonName || null;
+      info.percentRemaining = resume.percentRemaining != null ? Number(resume.percentRemaining) : null;
+      info.scenario = resume.resumeScenario || null;
+      info.activitySetId = resume.activitySetId != null ? resume.activitySetId : null;
+    }
+  } catch (e) {
+    console.warn("Resume fetch error:", e.message);
+  }
+  return info;
+}
+
+// ==================== CONCURRENT TASK LOCK ====================
+// Prevents two tasks of the SAME user running at the same time (User A / User B conflict fix).
+// Each (loginId, section, activitySetId) combination is locked while being processed.
+const taskLocks = new Map();
+
+function acquireTaskLock(key) {
+  let lock = taskLocks.get(key);
+  if (!lock) {
+    lock = { locked: false, queue: [] };
+    taskLocks.set(key, lock);
+  }
+  return new Promise((resolve) => {
+    if (!lock.locked) {
+      lock.locked = true;
+      return resolve();
+    }
+    lock.queue.push(resolve);
+  });
+}
+
+function releaseTaskLock(key) {
+  const lock = taskLocks.get(key);
+  if (!lock) return;
+  const next = lock.queue.shift();
+  if (next) {
+    // next acquires the lock
+    return;
+  }
+  lock.locked = false;
+  if (lock.queue.length === 0) taskLocks.delete(key);
+}
+
 // ==================== LOGIN ====================
+// Run an RCA call, and if it fails with a session-invalidation error,
+// re-authenticate the user and retry once with the fresh token.
+// Per-user load queue so concurrent requests (levels x N) share one session refresh.
+const userLoadQueues = new Map();
+async function runWithUserLock(loginId, fn) {
+  let lock = userLoadQueues.get(loginId);
+  if (!lock) { lock = { chain: Promise.resolve(), busy: false }; userLoadQueues.set(loginId, lock); }
+  return new Promise((resolve, reject) => {
+    const next = lock.chain.finally(() => fn().then(resolve, reject));
+    lock.chain = next.catch(() => {});
+  });
+}
+
+async function retryWithReauth(fn, user, maxAttempts = 2) {
+  try {
+    return await fn();
+  } catch (e) {
+    const msg = String(e.message || "").toLowerCase();
+    const isExpiry = SESSION_EXPIRY_HINTS.some((h) => msg.includes(h)) || (e && (e.status === 401 || e.status === 403));
+    if (!isExpiry) throw e;
+    try {
+      await acquireSessionLock(user.loginId);
+      await ensureSessionValid(user);
+    } catch (_) {}
+    finally { releaseSessionLock(user.loginId); }
+    if (maxAttempts <= 1) throw e;
+    await sleep(400);
+    return retryWithReauth(fn, user, maxAttempts - 1);
+  }
+}
+
+// Refresh an in-memory user's token when RCA reports the session was
+// invalidated (e.g. login from another device) while the server session is alive.
+const SESSION_EXPIRY_HINTS = ["another device", "sign in again", "validate session", "session expired"];
+function isAuthError(e) {
+  const msg = String(e && (e.message || e) || "").toLowerCase();
+  const status = e && e.status;
+  return (status === 401 || status === 403) || SESSION_EXPIRY_HINTS.some((h) => msg.includes(h));
+}
+const sessionRefreshLocks = new Map();
+function acquireSessionLock(loginId) {
+  let lock = sessionRefreshLocks.get(loginId);
+  if (!lock) { lock = { locked: false, queue: [] }; sessionRefreshLocks.set(loginId, lock); }
+  return new Promise((resolve) => {
+    if (!lock.locked) { lock.locked = true; return resolve(); }
+    lock.queue.push(resolve);
+  });
+}
+function releaseSessionLock(loginId) {
+  const lock = sessionRefreshLocks.get(loginId);
+  if (!lock) return;
+  const next = lock.queue.shift();
+  if (next) { lock.locked = true; next(); } else { lock.locked = false; }
+}
+async function ensureSessionValid(user) {
+  if (!user.accessToken) throw new Error("No token");
+  // Bounded re-auth attempts — RCA allows only ONE active session per user,
+  // so if the user is actively logged in on the RCA website we cannot hold a token.
+  for (let i = 0; i < 2; i++) {
+    try {
+      await rcaRequest("POST", "/userDetails?inputKeywordList=0", { token: user.accessToken, body: "", loginId: user.loginId, clientInfo: user.clientInfo });
+      return; // token valid
+    } catch (e) {
+      const msg = String(e.message || "").toLowerCase();
+      const isExpiry = SESSION_EXPIRY_HINTS.some((h) => msg.includes(h)) || (e && (e.status === 401 || e.status === 403));
+      if (!isExpiry) throw e;
+      if (i === 0) {
+        console.log(`[Session] Token invalidated for ${user.loginId} — re-authenticating...`);
+        const u = await rcaLogin(user.loginId, "", user.clientInfo);
+        user.accessToken = u.accessToken;
+        user.learnerId = u.learnerId || user.learnerId;
+        user.userId = u.userId || user.userId;
+        user.name = u.name || user.name;
+        user.coins = u.coins != null ? u.coins : user.coins;
+        if (u.packageId) user.packageId = u.packageId;
+        if (u.curriculumId) user.curriculumId = u.curriculumId;
+        if (u.resumeInfo) user.resumeInfo = u.resumeInfo;
+        console.log(`[Session] Re-authenticated ${user.loginId}`);
+      } else {
+        // Second attempt still failed (user likely active on the RCA website).
+        throw new Error("Session busy on another device — try again shortly");
+      }
+    }
+  }
+}
+
 async function rcaLogin(loginId, userPassword, clientInfo) {
   const reqPassword = userPassword || CONFIG.APP_PASSWORD;
   console.log(`[Login] ID: ${loginId}`);
@@ -870,7 +1629,7 @@ async function rcaLogin(loginId, userPassword, clientInfo) {
 
       console.log(`[Login OK] ID: ${loginId}`);
 
-      return {
+      const sessionUser = {
         accessToken: token,
         loginId: String(loginId).trim(),
         learnerId: details.learnerId || loginRes.learnerId || String(loginId),
@@ -881,6 +1640,12 @@ async function rcaLogin(loginId, userPassword, clientInfo) {
         curriculumId: details.curriculumId || 3,
         clientInfo,
       };
+
+      // Resolve resume (open section/unit/lesson) right after login
+      const resumeInfo = await fetchResumeInfo(sessionUser);
+      sessionUser.resumeInfo = resumeInfo;
+
+      return sessionUser;
     } catch (e) {
       lastError = e;
       console.error(`[Login Attempt ${attempt}] ${e.message}`);
@@ -996,10 +1761,45 @@ async function runCompleteJob(job, userSessions, rawTasks, sectionId) {
       }
       lastUser = t.session.loginId;
 
+      const lockKey = `task:${t.session.loginId}:${sectionId}:${t.activitySetId}`;
       try {
-        await section.completeActivity(t.session, t.activitySetId, (msg, lvl) => jobLog(job, `[${t.userName}] ${msg}`, lvl), apiLogger);
-      } catch (err) {
-        jobLog(job, `[${t.userName}] Error: ${err.message}`, "error");
+        await acquireTaskLock(lockKey);
+        try {
+          await section.completeActivity(t.session, t.activitySetId, (msg, lvl) => jobLog(job, `[${t.userName}] ${msg}`, lvl), apiLogger);
+        } catch (err) {
+          // CONCURRENT CONFLICT RECOVERY (User A / User B same task fix):
+          // If our INPROGRESS submission was rejected because someone else started it,
+          // fetch fresh state and try to finish (SUBMIT) the already-in-progress activity.
+          jobLog(job, `[${t.userName}] Error: ${err.message}`, "error");
+          const stateErr = err.message || "";
+          const conflict = /inprogress|already in progress|already started|lock|locked/i.test(stateErr);
+          if (conflict) {
+            try {
+              const fresh = await rcaRequest("GET", `/activitySetDetails/${t.activitySetId}/0/${Date.now()}/false`, {
+                token: t.session.accessToken,
+                loginId: t.session.loginId,
+                clientInfo: t.session.clientInfo,
+              });
+              if (fresh && fresh.learnerId === String(t.session.learnerId) && (fresh.activityState === "INPROGRESS" || fresh.learnerId)) {
+                jobLog(job, `[${t.userName}] Resolving conflict by submitting in-progress activity...`, "warn");
+                const now = Date.now();
+                fresh.startDate = fresh.startDate || now - 40000;
+                fresh.endDate = now;
+                fresh.totalTimeTaken = Math.max(20, Math.floor((now - fresh.startDate) / 1000));
+                fresh.activityState = "SUBMITTED";
+                fresh.learnerId = t.session.learnerId;
+                await submitActivity(t.session.accessToken, fresh, "SUBMITTED", t.session.learnerId, t.session.loginId, t.session.clientInfo, apiLogger);
+                const lessonId = fresh.lessonId || t.activitySetId;
+                await updateTimeTaken(t.session.accessToken, t.session.learnerId, lessonId, t.activitySetId, fresh.totalTimeTaken || 30, t.session.loginId, t.session.clientInfo, apiLogger, section.activityType || "Lesson");
+                jobLog(job, `[${t.userName}] ✓ Conflict resolved, submitted: ${t.activitySetId}`, "success");
+              }
+            } catch (recErr) {
+              jobLog(job, `[${t.userName}] Conflict recovery failed: ${recErr.message}`, "error");
+            }
+          }
+        }
+      } finally {
+        releaseTaskLock(lockKey);
       }
 
       job.current = i + 1;
@@ -1128,6 +1928,8 @@ async function handleApi(req, res, pathname) {
       user: publicUser(successfulLogins[0]),
       allUsers: successfulLogins.map(publicUser),
       token: encryptedToken,
+      resume: successfulLogins[0].resumeInfo || null,
+      openSection: (successfulLogins[0].resumeInfo && successfulLogins[0].resumeInfo.section) || null,
       ...results,
     });
   }
@@ -1146,7 +1948,22 @@ async function handleApi(req, res, pathname) {
       const sessionData = { users: s.users, createdAt: s.createdAt };
       setSessionCookie(res, encryptSession(sessionData));
     }
-    return sendJson(res, 200, { user: publicUser(s.users[0]), allUsers: s.users.map(publicUser) });
+
+    // On-demand resume resolution (covers sessions created without resume info)
+    if (!s.users[0].resumeInfo || !s.users[0].resumeInfo.section) {
+      try {
+        s.users[0].resumeInfo = await fetchResumeInfo(s.users[0]);
+      } catch (e) {
+        console.warn("On-demand resume error:", e.message);
+      }
+    }
+
+    return sendJson(res, 200, {
+      user: publicUser(s.users[0]),
+      allUsers: s.users.map(publicUser),
+      resume: s.users[0].resumeInfo || null,
+      openSection: (s.users[0].resumeInfo && s.users[0].resumeInfo.section) || null,
+    });
   }
 
   // GET SECTIONS
@@ -1172,18 +1989,41 @@ async function handleApi(req, res, pathname) {
     try {
       const allUserLevels = await Promise.all(
         s.users.map(async (user) => {
+          return runWithUserLock(user.loginId, async () => {
           const out = [];
+
+          // Auto re-login if RCA reports the session was invalidated elsewhere
+          try {
+            await acquireSessionLock(user.loginId);
+            await ensureSessionValid(user);
+          } catch (e) {
+            console.warn(`Re-login error: ${e.message}`);
+          } finally {
+            releaseSessionLock(user.loginId);
+          }
+
           let levelList;
           if (sectionId === 'ielts') {
             levelList = LEVEL_META.map((meta, idx) => ({ ...meta, id: idx + 4 }));
           } else {
-            const rawLevels = await section.getUserLevels(user.accessToken, user.loginId, user.clientInfo);
+            const rawLevels = await retryWithReauth(async () => {
+              return section.getUserLevels(user.accessToken, user.loginId, user.clientInfo);
+            }, user);
             levelList = rawLevels;
+          }
+
+          // Refresh resume info after successful level load
+          try {
+            user.resumeInfo = await fetchResumeInfo(user);
+          } catch (e) {
+            // ignore resume resolution failures
           }
 
           for (const level of levelList) {
             try {
-              const data = await section.loadLevelData(user.accessToken, level, user.loginId, user.clientInfo);
+              let data = await retryWithReauth(async () => {
+                return section.loadLevelData(user.accessToken, level, user.loginId, user.clientInfo);
+              }, user);
 
               // Filter out 0/0 skills but keep activities with completion status
               const filteredSkills = Object.entries(data.skills)
@@ -1225,7 +2065,8 @@ async function handleApi(req, res, pathname) {
               });
             }
           }
-          return { loginId: user.loginId, name: user.name, learnerId: user.learnerId, levels: out };
+          return { loginId: user.loginId, name: user.name, learnerId: user.learnerId, resume: user.resumeInfo || null, levels: out };
+          });
         })
       );
       return sendJson(res, 200, { users: allUserLevels });
@@ -1294,12 +2135,16 @@ async function handleApi(req, res, pathname) {
         try {
           const data = await sectionObj.loadLevelData(session.accessToken, level, session.loginId, session.clientInfo);
 
-          // If unitId is provided (LearnEnglish), only queue tasks from that unit
-          if (unitId && data.units && data.units.length > 0) {
-            const targetUnit = data.units.find(u => String(u.unitId) === String(unitId));
-            if (targetUnit && targetUnit.lessons) {
+          // If section is unit-based (learnenglish / apex / wordcraft)
+          if (data.units && data.units.length > 0) {
+            const unitsToScan = data.units.filter((u) => !u.isLocked);
+            const targetUnits = unitId
+              ? unitsToScan.filter(u => String(u.unitId) === String(unitId))
+              : unitsToScan;
+            for (const targetUnit of targetUnits) {
+              if (!targetUnit.lessons) continue;
               targetUnit.lessons.forEach((lesson) => {
-                if (!lesson.isCompleted && lesson.activitySetId) {
+                if (!lesson.isCompleted && !lesson.isLocked && lesson.activitySetId) {
                   rawTasks.push({
                     userName: session.name,
                     userLoginId: session.loginId,
@@ -1310,7 +2155,7 @@ async function handleApi(req, res, pathname) {
                 }
               });
             }
-            continue;
+            if (sectionObj.activityType !== "Ielts") continue;
           }
 
           let skillKeys = Object.keys(data.skills).filter(k => (data.skills[k].totalActivities || 0) > 0);
@@ -1391,7 +2236,7 @@ server.listen(CONFIG.PORT, CONFIG.HOST, () => {
   console.log(" 📍 URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
   console.log(" 🔒 Session: 24h TTL + Auto-Refresh");
   console.log(" ⚡ Connection: Keep-Alive + Smart Retry");
-  console.log(" 📚 Sections: LearnEnglish + IELTS");
+  console.log(" 📚 Sections: LearnEnglish + IELTS + APEX + Wordcraft + Vocab Builder");
   console.log(" 📡 Live API Console: Enabled");
   console.log(" ✅ Complete All Level + Complete All Levels: Supported");
   console.log("=".repeat(70));
