@@ -592,28 +592,6 @@ function isPersistedSubmitted(activity) {
 }
 
 
-function activityScore(activity) {
-  if (!activity) return 0;
-  for (const field of ["totalEarnedScore", "earnedScore", "score", "resultScore"]) {
-    if (activity[field] != null && activity[field] !== "") {
-      const value = Number(activity[field]);
-      if (Number.isFinite(value)) return value;
-    }
-  }
-  return 0;
-}
-
-function isScoredSubmitted(activity) {
-  return isPersistedSubmitted(activity) && (activityScore(activity) > 0 || Number(activity.totalAnswersCorrect || 0) > 0);
-}
-
-function lessonNeedsScoreRetake(lesson) {
-  if (!lesson || !detectLessonCompletion(lesson)) return false;
-  const fields = [lesson.lessonCompletionScore, lesson.totalEarnedScore, lesson.score, lesson.totalScore, lesson.lessonPercentage];
-  const value = fields.find((item) => item != null && item !== "");
-  return value != null && Number(value) <= 0;
-}
-
 function isManualOnlyQuestion(question) {
   const type = String(question && (question.itemType || question.answerType || question.type) || "").toUpperCase();
   return /SPEAK|RECORD|PRONUNCIATION|LISTENING_RECORD/.test(type);
@@ -797,8 +775,7 @@ const SECTIONS = {
             }
 
             const actId = lesson.activitySetId || lesson.activitySetID || lesson.activityId;
-            const needsScoreRetake = lessonNeedsScoreRetake(lesson);
-            const isComplete = detectLessonCompletion(lesson) && !needsScoreRetake;
+            const isComplete = detectLessonCompletion(lesson);
 
             unitLessons.push({
               lessonId: lesson.lessonId,
@@ -806,8 +783,7 @@ const SECTIONS = {
               activitySetId: actId || null,
               skillKey,
               isCompleted: isComplete,
-              needsScoreRetake,
-              status: needsScoreRetake ? "RETAKE_SCORE" : (isComplete ? "COMPLETED" : "NEW"),
+              status: isComplete ? "COMPLETED" : "NEW",
             });
 
             if (actId) {
@@ -881,25 +857,14 @@ const SECTIONS = {
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
 
-      if (isScoredSubmitted(activity)) {
+      if (isPersistedSubmitted(activity)) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
 
       const allQuestions = activity.activityQuestionDetailsList || [];
-      const manualQuestions = allQuestions.filter((question) => isManualOnlyQuestion(question) && !hasAnswer(question));
-      if (manualQuestions.length > 0) {
-        onLog && onLog(`Manual recording required for ${manualQuestions.length} question(s); RCA was not called with an invalid empty answer.`, "warn");
-        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
-      }
-
       // Fill answers with CORRECT OPTION ID handling
       activity = fillAnswers(activity);
-      const unansweredQuestions = allQuestions.filter((question) => !hasAnswer(question) && !isManualOnlyQuestion(question));
-      if (unansweredQuestions.length > 0) {
-        onLog && onLog(`Manual answer required for ${unansweredQuestions.length} question(s); RCA submission skipped safely.`, "warn");
-        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
-      }
       activity.activityState = "INPROGRESS";
       activity.learnerId = learnerId;
       activity.startDate = Date.now() - 28000;
@@ -1011,8 +976,7 @@ const SECTIONS = {
             }
 
             const actId = lesson.activitySetId || lesson.id || null;
-            const needsScoreRetake = lessonNeedsScoreRetake(lesson);
-            const isComplete = detectLessonCompletion(lesson) && !needsScoreRetake;
+            const isComplete = detectLessonCompletion(lesson);
             const lessonLocked = isLessonLockedForUser(lesson);
 
             if (!lessonLocked) {
@@ -1023,8 +987,7 @@ const SECTIONS = {
                 skillKey,
                 isCompleted: isComplete,
                 isLocked: lessonLocked,
-                needsScoreRetake,
-                status: needsScoreRetake ? "RETAKE_SCORE" : (isComplete ? "COMPLETED" : "NEW"),
+              status: isComplete ? "COMPLETED" : "NEW",
               });
 
               if (actId) {
@@ -1101,25 +1064,14 @@ const SECTIONS = {
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
 
-      if (isScoredSubmitted(activity)) {
+      if (isPersistedSubmitted(activity)) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
 
       const allQuestions = activity.activityQuestionDetailsList || [];
-      const manualQuestions = allQuestions.filter((question) => isManualOnlyQuestion(question) && !hasAnswer(question));
-      if (manualQuestions.length > 0) {
-        onLog && onLog(`Manual recording required for ${manualQuestions.length} question(s); RCA was not called with an invalid empty answer.`, "warn");
-        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
-      }
-
       // Fill answers with CORRECT OPTION ID handling
       activity = fillAnswers(activity);
-      const unansweredQuestions = allQuestions.filter((question) => !hasAnswer(question) && !isManualOnlyQuestion(question));
-      if (unansweredQuestions.length > 0) {
-        onLog && onLog(`Manual answer required for ${unansweredQuestions.length} question(s); RCA submission skipped safely.`, "warn");
-        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
-      }
       activity.activityState = "INPROGRESS";
       activity.learnerId = learnerId;
       activity.startDate = Date.now() - 28000;
@@ -1220,8 +1172,7 @@ const SECTIONS = {
             }
 
             const actId = lesson.activitySetId || lesson.id || null;
-            const needsScoreRetake = lessonNeedsScoreRetake(lesson);
-            const isComplete = detectLessonCompletion(lesson) && !needsScoreRetake;
+            const isComplete = detectLessonCompletion(lesson);
             const lessonLocked = isLessonLockedForUser(lesson);
 
             if (!lessonLocked) {
@@ -1232,8 +1183,7 @@ const SECTIONS = {
                 skillKey,
                 isCompleted: isComplete,
                 isLocked: lessonLocked,
-                needsScoreRetake,
-                status: needsScoreRetake ? "RETAKE_SCORE" : (isComplete ? "COMPLETED" : "NEW"),
+              status: isComplete ? "COMPLETED" : "NEW",
               });
 
               if (actId) {
@@ -1310,25 +1260,14 @@ const SECTIONS = {
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
 
-      if (isScoredSubmitted(activity)) {
+      if (isPersistedSubmitted(activity)) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
 
       const allQuestions = activity.activityQuestionDetailsList || [];
-      const manualQuestions = allQuestions.filter((question) => isManualOnlyQuestion(question) && !hasAnswer(question));
-      if (manualQuestions.length > 0) {
-        onLog && onLog(`Manual recording required for ${manualQuestions.length} question(s); RCA was not called with an invalid empty answer.`, "warn");
-        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
-      }
-
       // Fill answers with CORRECT OPTION ID handling
       activity = fillAnswers(activity);
-      const unansweredQuestions = allQuestions.filter((question) => !hasAnswer(question) && !isManualOnlyQuestion(question));
-      if (unansweredQuestions.length > 0) {
-        onLog && onLog(`Manual answer required for ${unansweredQuestions.length} question(s); RCA submission skipped safely.`, "warn");
-        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
-      }
       activity.activityState = "INPROGRESS";
       activity.learnerId = learnerId;
       activity.startDate = Date.now() - 28000;
@@ -1429,8 +1368,7 @@ const SECTIONS = {
             }
 
             const actId = lesson.activitySetId || lesson.id || null;
-            const needsScoreRetake = lessonNeedsScoreRetake(lesson);
-            const isComplete = detectLessonCompletion(lesson) && !needsScoreRetake;
+            const isComplete = detectLessonCompletion(lesson);
             const lessonLocked = isLessonLockedForUser(lesson);
 
             if (!lessonLocked) {
@@ -1441,8 +1379,7 @@ const SECTIONS = {
                 skillKey,
                 isCompleted: isComplete,
                 isLocked: lessonLocked,
-                needsScoreRetake,
-                status: needsScoreRetake ? "RETAKE_SCORE" : (isComplete ? "COMPLETED" : "NEW"),
+              status: isComplete ? "COMPLETED" : "NEW",
               });
 
               if (actId) {
@@ -1519,25 +1456,14 @@ const SECTIONS = {
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
 
-      if (isScoredSubmitted(activity)) {
+      if (isPersistedSubmitted(activity)) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
 
       const allQuestions = activity.activityQuestionDetailsList || [];
-      const manualQuestions = allQuestions.filter((question) => isManualOnlyQuestion(question) && !hasAnswer(question));
-      if (manualQuestions.length > 0) {
-        onLog && onLog(`Manual recording required for ${manualQuestions.length} question(s); RCA was not called with an invalid empty answer.`, "warn");
-        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
-      }
-
       // Fill answers with CORRECT OPTION ID handling
       activity = fillAnswers(activity);
-      const unansweredQuestions = allQuestions.filter((question) => !hasAnswer(question) && !isManualOnlyQuestion(question));
-      if (unansweredQuestions.length > 0) {
-        onLog && onLog(`Manual answer required for ${unansweredQuestions.length} question(s); RCA submission skipped safely.`, "warn");
-        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
-      }
       activity.activityState = "INPROGRESS";
       activity.learnerId = learnerId;
       activity.startDate = Date.now() - 28000;
@@ -1661,25 +1587,14 @@ const SECTIONS = {
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
 
-      if (isScoredSubmitted(activity)) {
+      if (isPersistedSubmitted(activity)) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
 
       const allQuestions = activity.activityQuestionDetailsList || [];
-      const manualQuestions = allQuestions.filter((question) => isManualOnlyQuestion(question) && !hasAnswer(question));
-      if (manualQuestions.length > 0) {
-        onLog && onLog(`Manual recording required for ${manualQuestions.length} question(s); RCA was not called with an invalid empty answer.`, "warn");
-        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
-      }
-
       // Fill answers with CORRECT OPTION ID handling
       activity = fillAnswers(activity);
-      const unansweredQuestions = allQuestions.filter((question) => !hasAnswer(question) && !isManualOnlyQuestion(question));
-      if (unansweredQuestions.length > 0) {
-        onLog && onLog(`Manual answer required for ${unansweredQuestions.length} question(s); RCA submission skipped safely.`, "warn");
-        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
-      }
       activity.activityState = "INPROGRESS";
       activity.learnerId = learnerId;
       activity.startDate = Date.now() - 28000;
@@ -1711,57 +1626,83 @@ const SECTIONS = {
 };
 
 // ==================== ANSWER LOGIC - FIXED ====================
+function normalizeRcaOptionId(value) {
+  return /^\d+$/.test(String(value)) ? Number(value) : value;
+}
+
+function isTextAnswerQuestion(question) {
+  const type = String(question && (question.itemType || question.answerType || question.type) || "").toUpperCase();
+  return /FIB|SHORTANSWER|TEXTANSWER|ESSAY|WRITING/.test(type);
+}
+
+function isNonAnswerQuestion(question) {
+  const type = String(question && (question.itemType || question.answerType || question.type) || "").toUpperCase();
+  return /COMPREHENSION|PASSAGE|IELTSLISTENING|IELTSSPEAKING|LISTENANDRECORD|RECORD/.test(type);
+}
+
 function fillAnswers(activity) {
   let correctCount = 0;
   let attemptedCount = 0;
   let earnedScore = 0;
-  const list = activity.activityQuestionDetailsList || [];
+  const list = Array.isArray(activity && activity.activityQuestionDetailsList) ? activity.activityQuestionDetailsList : [];
 
   list.forEach((q) => {
-    let answer = q.userAnswer;
     const options = Array.isArray(q.activityAnswerDTO) ? q.activityAnswerDTO : [];
     const correctOptions = options.filter((o) => o.isCorrect === true);
+    let answer = q.userAnswer;
+    const empty = answer == null || answer === "" || (Array.isArray(answer) && answer.length === 0);
 
-    // If no answer provided, select correct answer
-    if (answer == null || answer === "") {
-      if (q.answerType === "ESSAY" || String(q.itemType || "").toUpperCase().includes("ESSAY")) {
-        answer = q.userEssay || "This is my response.";
+    if (empty && !isManualOnlyQuestion(q)) {
+      if (isTextAnswerQuestion(q)) {
+        // RCA expects the answer text for FIB/SHORTANSWER, not the option ID.
+        const correctText = q.correctAnswer != null && String(q.correctAnswer).trim() !== ""
+          ? String(q.correctAnswer).trim()
+          : (correctOptions[0] && (correctOptions[0].answerOption || correctOptions[0].text));
+        answer = correctText || q.userEssay || "";
       } else if (correctOptions.length > 1) {
-        // Multiple correct answers - use option IDs
-        answer = correctOptions.map((o) => /^\d+$/.test(String(o.id)) ? Number(o.id) : String(o.id));
+        // MRQ: RCA expects all selected option IDs as numbers.
+        answer = correctOptions.map((o) => normalizeRcaOptionId(o.id));
       } else if (correctOptions.length === 1) {
-        // Single correct answer - use option ID (not text)
-        answer = /^\d+$/.test(String(correctOptions[0].id)) ? Number(correctOptions[0].id) : String(correctOptions[0].id);
-      } else if (q.correctAnswer != null && q.correctAnswer !== "") {
-        // Fallback: try to match by ID or text
+        // MCQ: RCA expects the selected option ID as a number.
+        answer = normalizeRcaOptionId(correctOptions[0].id);
+      } else if (q.correctAnswer != null && String(q.correctAnswer).trim() !== "") {
         const byId = options.find((o) => String(o.id) === String(q.correctAnswer));
-        const byText = options.find((o) => String(o.answerOption || "").trim().toLowerCase() === String(q.correctAnswer).trim().toLowerCase());
-        answer = byId ? (/^\d+$/.test(String(byId.id)) ? Number(byId.id) : String(byId.id)) : (byText ? (/^\d+$/.test(String(byText.id)) ? Number(byText.id) : String(byText.id)) : String(q.correctAnswer));
+        const byText = options.find((o) => String(o.answerOption || o.text || "").trim().toLowerCase() === String(q.correctAnswer).trim().toLowerCase());
+        answer = isTextAnswerQuestion(q)
+          ? String(byText ? (byText.answerOption || byText.text) : q.correctAnswer).trim()
+          : normalizeRcaOptionId(byId ? byId.id : q.correctAnswer);
       } else {
         answer = "";
       }
     }
 
+    const hasValue = !(answer == null || answer === "" || (Array.isArray(answer) && answer.length === 0));
     q.userAnswer = answer;
     q.submittedUserAnswer = answer;
-    q.isSubmitClicked = true;
-    q.allAnswersRecorded = true;
-    attemptedCount += answer !== "" && answer != null ? 1 : 0;
+    const questionType = String(q.itemType || q.answerType || q.type || "").toUpperCase();
+    const isSpeakingQuestion = /SPEAK|PRONUNCIATION|RECORD/.test(questionType);
+    q.isSubmitClicked = hasValue || isSpeakingQuestion;
+    // RCA records parent/media items as recorded, while answered objective items keep this false.
+    q.allAnswersRecorded = !hasValue && isNonAnswerQuestion(q);
+    if (hasValue) attemptedCount++;
 
-    // Verify correctness
     let correct = false;
     if (Array.isArray(answer)) {
       correct = answer.length > 0 && answer.every((value) => options.some((o) => String(o.id) === String(value) && o.isCorrect === true));
     } else {
       const matched = options.find((o) => String(o.id) === String(answer));
-      correct = matched ? matched.isCorrect === true : (q.correctAnswer != null && String(answer).trim().toLowerCase() === String(q.correctAnswer).trim().toLowerCase());
+      const expectedText = q.correctAnswer != null ? String(q.correctAnswer).trim().toLowerCase() : "";
+      const answerText = String(answer == null ? "" : answer).trim().toLowerCase();
+      correct = matched ? matched.isCorrect === true : (!!expectedText && answerText === expectedText);
+      if (!correct && isTextAnswerQuestion(q) && correctOptions.length) {
+        correct = correctOptions.some((o) => String(o.answerOption || o.text || "").trim().toLowerCase() === answerText);
+      }
     }
-    
+
     q.isUserAnswerCorrect = !!correct;
     if (correct) {
       correctCount++;
-      const itemScore = Number(q.itemScore || q.score || 1);
-      earnedScore += itemScore;
+      earnedScore += Number(q.itemScore || q.score || 1);
     }
   });
 
@@ -1819,61 +1760,6 @@ async function submitActivityWithRecovery(token, activity, state, learnerId, log
     if (!rebuilt.startDate) rebuilt.startDate = Date.now() - 30000;
     return submitActivity(token, rebuilt, state, learnerId, loginId, clientInfo, apiLogger);
   }
-}
-
-function publicActivity(activity) {
-  const questions = Array.isArray(activity && activity.activityQuestionDetailsList) ? activity.activityQuestionDetailsList : [];
-  return {
-    activitySetId: activity.activityId || activity.activitySetId || activity.id,
-    activityName: activity.activityName || activity.lessonName || "Activity",
-    activityState: activity.activityState || "NEW",
-    totalQuestions: activity.totalQuestions || questions.length,
-    totalEarnedScore: activity.totalEarnedScore || 0,
-    totalAnswersCorrect: activity.totalAnswersCorrect || 0,
-    questions: questions.map((q, index) => ({
-      index,
-      itemId: q.itemId,
-      activityResultDetailId: q.activityResultDetailId,
-      itemType: q.itemType,
-      question: q.itemQuestion || q.itemEnglishQuestion || q.questionText || `Question ${index + 1}`,
-      instruction: q.itemInstruction || q.itemEnglishInstruction || "",
-      options: (Array.isArray(q.activityAnswerDTO) ? q.activityAnswerDTO : []).map((o) => ({ id: o.id, text: o.answerOption || o.activityItem || "", isImage: !!o.isImage, imageUrl: o.imageUrl || null }))
-    }))
-  };
-}
-
-async function submitManualActivity(session, activitySetId, answers) {
-  const activity = await fetchActivityDetails(activitySetId, session.accessToken, session.loginId, session.clientInfo);
-  const questions = Array.isArray(activity && activity.activityQuestionDetailsList) ? activity.activityQuestionDetailsList : [];
-  if (!questions.length) throw new Error("RCA returned no questions for this activity");
-  const answerMap = answers && typeof answers === "object" ? answers : {};
-  let answered = 0;
-  for (const q of questions) {
-    const keys = [q.activityResultDetailId, q.itemId].filter((value) => value != null).map(String);
-    const key = keys.find((candidate) => Object.prototype.hasOwnProperty.call(answerMap, candidate));
-    if (key == null) continue;
-    let answer = answerMap[key];
-    const optionIds = new Set((Array.isArray(q.activityAnswerDTO) ? q.activityAnswerDTO : []).map((option) => String(option.id)));
-    if (Array.isArray(answer)) answer = answer.map((value) => optionIds.has(String(value)) ? Number(value) : value);
-    else if (optionIds.has(String(answer))) answer = Number(answer);
-    q.userAnswer = answer;
-    q.submittedUserAnswer = answer;
-    q.isSubmitClicked = true;
-    q.allAnswersRecorded = true;
-    if (answer !== "" && answer != null && !(Array.isArray(answer) && answer.length === 0)) answered++;
-  }
-  if (!answered) throw new Error("Answer at least one question before submitting");
-  activity.activityState = "INPROGRESS";
-  activity.learnerId = session.learnerId;
-  activity.startDate = activity.startDate || Date.now() - 30000;
-  activity.totalQuestionsAttempted = answered;
-  activity.totalQuestionsLeft = Math.max(0, Number(activity.totalQuestions || questions.length) - answered);
-  await submitActivityWithRecovery(session.accessToken, activity, "INPROGRESS", session.learnerId, session.loginId, session.clientInfo, null, activitySetId);
-  await submitActivityWithRecovery(session.accessToken, activity, "SUBMITTED", session.learnerId, session.loginId, session.clientInfo, null, activitySetId);
-  await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
-  const verified = await fetchActivityDetails(activitySetId, session.accessToken, session.loginId, session.clientInfo);
-  if (!isPersistedSubmitted(verified)) throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
-  return { activity: publicActivity(verified), score: activityScore(verified), scored: isScoredSubmitted(verified), retakeRequired: !isScoredSubmitted(verified) };
 }
 
 async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, loginId, clientInfo, apiLogger, activityType = "Ielts") {
@@ -2174,7 +2060,7 @@ async function runCompleteJob(job, userSessions, rawTasks, sectionId) {
       job.task = `Checking tasks... (${job.current}/${rawTasks.length})`;
       try {
         const activity = await fetchActivityDetails(t.activitySetId, t.session.accessToken, t.session.loginId, t.session.clientInfo);
-        if (isScoredSubmitted(activity)) {
+        if (isPersistedSubmitted(activity)) {
           jobLog(job, `[${t.userName}] Already scored: ${t.activitySetId}`, "warn");
           return null;
         }
@@ -2513,37 +2399,6 @@ async function handleApi(req, res, pathname) {
       setSessionCookie(res, encryptSession(refreshed));
       return sendJson(res, 200, { section: { id: section.id, name: section.name }, insights, fetchedAt: Date.now() });
     } catch (error) { return sendJson(res, error.status || 502, { error: error.message || "Could not load RCA reports." }); }
-  }
-
-  // READ/SUBMIT ONE ACTIVITY FOR MANUAL RETAKES
-  if (pathname === "/api/activity" && req.method === "GET") {
-    const s = requireAuth(req, res);
-    if (!s) return;
-    const url = new URL(req.url, "http://localhost");
-    const activitySetId = String(url.searchParams.get("activitySetId") || "").trim();
-    const sectionId = String(url.searchParams.get("section") || "").trim();
-    if (!activitySetId || !SECTIONS[sectionId]) return sendJson(res, 400, { error: "activitySetId and valid section are required" });
-    const access = await getSectionAccess(s.users[0]);
-    if (!access.unlocked[sectionId]) return sendJson(res, 403, { error: "This section is locked for your RCA account" });
-    try {
-      const activity = await fetchActivityDetails(activitySetId, s.users[0].accessToken, s.users[0].loginId, s.users[0].clientInfo);
-      return sendJson(res, 200, publicActivity(activity));
-    } catch (e) { return sendJson(res, e.status || 502, { error: e.message || "Activity questions could not be loaded" }); }
-  }
-
-  if (pathname === "/api/activity/submit" && req.method === "POST") {
-    const s = requireAuth(req, res);
-    if (!s) return;
-    try {
-      const body = await readJson(req);
-      const activitySetId = String(body.activitySetId || "").trim();
-      const sectionId = String(body.section || "").trim();
-      if (!activitySetId || !SECTIONS[sectionId]) return sendJson(res, 400, { error: "activitySetId and valid section are required" });
-      const access = await getSectionAccess(s.users[0]);
-      if (!access.unlocked[sectionId]) return sendJson(res, 403, { error: "This section is locked for your RCA account" });
-      const result = await runWithUserLock(s.users[0].loginId, () => submitManualActivity(s.users[0], activitySetId, body.answers || {}));
-      return sendJson(res, 200, { ok: true, ...result });
-    } catch (e) { return sendJson(res, e.status || 502, { error: e.message || "RCA activity submission failed" }); }
   }
 
   // PLACEMENT TEST
