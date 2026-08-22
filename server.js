@@ -522,14 +522,9 @@ const SECTION_PACKAGE_NAMES = {
 };
 
 function isPackageUnlocked(row) {
-  if (!row) return false;
-  const expired = row.isExpired === true || String(row.isExpired || "").trim().toLowerCase() === "true";
-  const explicitlyLocked = row.isLocked === true || row.locked === true || String(row.isLocked || row.locked || "").trim().toLowerCase() === "true";
-  if (expired || explicitlyLocked) return false;
-  const status = String(row.status || row.packageStatus || row.subscriptionStatus || "").trim().toUpperCase().replace(/\s+/g, "_");
-  if (["LOCKED", "NOT_PURCHASED", "EXPIRED", "INACTIVE", "NOT_AVAILABLE"].includes(status)) return false;
-  const levels = Array.isArray(row.programSummaryLevelDtoList) ? row.programSummaryLevelDtoList : [];
-  return status.length > 0 || levels.length > 0 || row.viewLessons === true;
+  if (!row || row.isExpired === true) return false;
+  const status = String(row.status || "").trim().toUpperCase().replace(/\s+/g, "_");
+  return !["LOCKED", "NOT_PURCHASED", "EXPIRED", "INACTIVE"].includes(status) && (status.length > 0 || Array.isArray(row.programSummaryLevelDtoList));
 }
 
 async function getSectionAccess(user, force = false) {
@@ -596,38 +591,6 @@ async function fetchActivityDetails(activitySetId, token, loginId, clientInfo) {
 
 function isPersistedSubmitted(activity) {
   return !!(activity && (activity.activityState === "SUBMITTED" || activity.activityState === "COMPLETED" || activity.isCompleted === true));
-}
-
-
-function numericScore(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function activityScore(activity) {
-  if (!activity) return 0;
-  const fields = ["totalEarnedScore", "earnedScore", "score", "totalScore", "resultScore"];
-  for (const field of fields) {
-    if (activity[field] != null && activity[field] !== "") return numericScore(activity[field]);
-  }
-  return 0;
-}
-
-function isScoredSubmitted(activity) {
-  if (!isPersistedSubmitted(activity)) return false;
-  return activityScore(activity) > 0 || numericScore(activity.totalAnswersCorrect) > 0;
-}
-
-function needsScoreRetake(activity) {
-  return isPersistedSubmitted(activity) && !isScoredSubmitted(activity) && numericScore(activity.totalQuestions || (activity.activityQuestionDetailsList || []).length) > 0;
-}
-
-function lessonNeedsScoreRetake(lesson) {
-  if (!lesson || !detectLessonCompletion(lesson)) return false;
-  const fields = [lesson.lessonCompletionScore, lesson.totalEarnedScore, lesson.score, lesson.totalScore, lesson.lessonPercentage];
-  const known = fields.find((value) => value != null && value !== "");
-  if (known != null) return numericScore(known) <= 0;
-  return false;
 }
 
 
@@ -719,121 +682,15 @@ async function getPlacementStatus(user) {
     return total > 0 ? done >= total : String(level.status || "").toUpperCase() === "COMPLETED";
   });
   if (!learnEnglishCompleted) return { available: false, learnEnglishCompleted: false, reason: "Complete LearnEnglish first" };
-  let details = {};
+  const activitySetId = process.env.RCA_PLACEMENT_ACTIVITY_SET_ID || "12";
   try {
-    details = await rcaRequest("POST", "/userDetails?inputKeywordList=0", { token: user.accessToken, body: "", loginId: user.loginId, clientInfo: user.clientInfo });
+    const activity = await fetchActivityDetails(activitySetId, user.accessToken, user.loginId, user.clientInfo);
+    const finalLike = String(activity.activityType || "").toUpperCase() === "FINAL" || activity.isFinalActivity === true || /FINAL|PLACEMENT/i.test(`${activity.activityName || ""} ${activity.lessonName || ""}`);
+    if (!finalLike) return { available: false, learnEnglishCompleted: true, reason: "RCA did not return a final placement activity" };
+    return { available: !isPersistedSubmitted(activity), completed: isPersistedSubmitted(activity), learnEnglishCompleted: true, activitySetId: String(activitySetId), activity: { lessonName: activity.lessonName, totalQuestions: activity.totalQuestions, totalAnswersCorrect: activity.totalAnswersCorrect, totalEarnedScore: activity.totalEarnedScore } };
   } catch (e) {
-    console.warn("Placement userDetails warning:", e.message);
+    return { available: false, learnEnglishCompleted: true, activitySetId: String(activitySetId), reason: e.message };
   }
-  if (details.placementDone === true && details.skipPlacement === true) {
-    return { available: false, completed: true, learnEnglishCompleted: true, reason: "RCA marks the placement test as completed" };
-  }
-  const configured = process.env.RCA_PLACEMENT_ACTIVITY_SET_ID || "";
-  const candidates = [...new Set([
-    details.currentActivitySetId,
-    details.placementActivitySetId,
-    configured,
-    "12",
-  ].filter((id) => id != null && String(id).trim() !== "").map(String))];
-  let lastError = null;
-  for (const activitySetId of candidates) {
-    try {
-      const activity = await fetchActivityDetails(activitySetId, user.accessToken, user.loginId, user.clientInfo);
-      const label = `${activity.activityType || ""} ${activity.activityName || ""} ${activity.lessonName || ""}`.toUpperCase();
-      const finalLike = String(activity.activityType || "").toUpperCase() === "FINAL" || activity.isFinalActivity === true || /FINAL|PLACEMENT|INITIAL ASSESSMENT/.test(label) || String(details.currentActivitySetId || "") === String(activitySetId);
-      if (!finalLike) continue;
-      const submitted = isPersistedSubmitted(activity);
-      const scored = isScoredSubmitted(activity);
-      return { available: !scored, completed: scored, retake: submitted && !scored, learnEnglishCompleted: true, activitySetId: String(activitySetId), activity: { lessonName: activity.lessonName || activity.activityName, totalQuestions: activity.totalQuestions, totalAnswersCorrect: activity.totalAnswersCorrect, totalEarnedScore: activity.totalEarnedScore, activityState: activity.activityState } };
-    } catch (e) { lastError = e; }
-  }
-  return { available: false, completed: false, learnEnglishCompleted: true, reason: lastError ? lastError.message : "RCA did not return a placement activity" };
-}
-
-
-
-function publicActivity(activity) {
-  const list = Array.isArray(activity && activity.activityQuestionDetailsList) ? activity.activityQuestionDetailsList : [];
-  return {
-    activitySetId: activity.activityId || activity.activitySetId || activity.id,
-    activityType: activity.activityType || "Lesson",
-    activityName: activity.activityName || activity.lessonName || "Activity",
-    activityState: activity.activityState || "NEW",
-    totalQuestions: activity.totalQuestions || list.length,
-    totalEarnedScore: activity.totalEarnedScore || 0,
-    totalAnswersCorrect: activity.totalAnswersCorrect || 0,
-    questions: list.map((q, index) => ({
-      index,
-      itemId: q.itemId,
-      activityResultDetailId: q.activityResultDetailId,
-      itemType: q.itemType,
-      question: q.itemQuestion || q.itemEnglishQuestion || q.questionText || "",
-      instruction: q.itemInstruction || q.itemEnglishInstruction || "",
-      imageUrl: q.itemImageUrl || null,
-      answerType: q.answerType || null,
-      options: (Array.isArray(q.activityAnswerDTO) ? q.activityAnswerDTO : []).map((o) => ({ id: o.id, text: o.answerOption || o.activityItem || "", isImage: !!o.isImage, imageUrl: o.imageUrl || null }))
-    }))
-  };
-}
-
-function answerKeyForQuestion(question) {
-  if (!question) return null;
-  return question.activityResultDetailId != null ? String(question.activityResultDetailId) : String(question.itemId);
-}
-
-async function submitManualActivity(session, activitySetId, answers, apiLogger) {
-  const activity = await fetchActivityDetails(activitySetId, session.accessToken, session.loginId, session.clientInfo);
-  if (!activity || !Array.isArray(activity.activityQuestionDetailsList) || activity.activityQuestionDetailsList.length === 0) throw new Error("RCA returned no questions for this activity");
-  const answerMap = answers && typeof answers === "object" ? answers : {};
-  let answered = 0;
-  for (const q of activity.activityQuestionDetailsList) {
-    const keys = [answerKeyForQuestion(q), q.itemId != null ? String(q.itemId) : null, q.activityResultDetailId != null ? String(q.activityResultDetailId) : null].filter(Boolean);
-    const key = keys.find((candidate) => Object.prototype.hasOwnProperty.call(answerMap, candidate));
-    if (key == null) continue;
-    let answer = answerMap[key];
-    const optionIds = new Set((Array.isArray(q.activityAnswerDTO) ? q.activityAnswerDTO : []).map((option) => String(option.id)));
-    if (Array.isArray(answer)) answer = answer.map((value) => optionIds.has(String(value)) ? Number(value) : value);
-    else if (optionIds.has(String(answer))) answer = Number(answer);
-    q.userAnswer = answer;
-    q.submittedUserAnswer = answer;
-    q.isSubmitClicked = true;
-    q.allAnswersRecorded = true;
-    answered += answer !== "" && answer != null && !(Array.isArray(answer) && answer.length === 0) ? 1 : 0;
-  }
-  if (answered === 0) throw new Error("Answer at least one question before submitting");
-  activity.activityState = "INPROGRESS";
-  activity.learnerId = session.learnerId;
-  activity.startDate = activity.startDate || Date.now() - 30000;
-  activity.totalQuestionsAttempted = answered;
-  activity.totalQuestionsLeft = Math.max(0, Number(activity.totalQuestions || activity.activityQuestionDetailsList.length) - answered);
-  await submitActivity(session.accessToken, activity, "INPROGRESS", session.learnerId, session.loginId, session.clientInfo, apiLogger);
-  await submitActivity(session.accessToken, activity, "SUBMITTED", session.learnerId, session.loginId, session.clientInfo, apiLogger);
-  await sleep(350);
-  const verified = await fetchActivityDetails(activitySetId, session.accessToken, session.loginId, session.clientInfo);
-  if (!isPersistedSubmitted(verified)) throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
-  return { activity: publicActivity(verified), scored: isScoredSubmitted(verified), retakeRequired: needsScoreRetake(verified) };
-}
-
-async function ensureScoredCertificateLevel(user, sectionId, levelId) {
-  const section = SECTIONS[sectionId];
-  if (!section) throw new Error("Invalid section");
-  const levels = sectionId === "ielts" ? LEVEL_META.map((meta, idx) => ({ ...meta, id: idx + 4 })) : await section.getUserLevels(user.accessToken, user.loginId, user.clientInfo);
-  const level = levels.find((item) => String(item.id) === String(levelId));
-  if (!level) throw new Error("Level was not found in the RCA account");
-  const data = await section.loadLevelData(user.accessToken, level, user.loginId, user.clientInfo);
-  const ids = new Set();
-  for (const unit of data.units || []) for (const lesson of unit.lessons || []) if (lesson.activitySetId) ids.add(String(lesson.activitySetId));
-  for (const skill of Object.values(data.skills || {})) for (const id of skill.activitySetIds || []) ids.add(String(id));
-  if (ids.size === 0) throw new Error("No RCA activities were found for this level");
-  const missing = [];
-  for (const id of ids) {
-    try {
-      const activity = await fetchActivityDetails(id, user.accessToken, user.loginId, user.clientInfo);
-      if (!isScoredSubmitted(activity)) missing.push(id);
-    } catch (_) { missing.push(id); }
-  }
-  if (missing.length) throw new Error(`Certificate blocked: ${missing.length} activity(s) are not verified with a positive RCA score. Retake them first.`);
-  return true;
 }
 
 // ==================== SECTIONS DEFINITION ====================
@@ -911,8 +768,7 @@ const SECTIONS = {
             }
 
             const actId = lesson.activitySetId || lesson.activitySetID || lesson.activityId;
-            const needsScoreRetake = lessonNeedsScoreRetake(lesson);
-            const isComplete = detectLessonCompletion(lesson) && !needsScoreRetake;
+            const isComplete = detectLessonCompletion(lesson);
 
             unitLessons.push({
               lessonId: lesson.lessonId,
@@ -920,8 +776,7 @@ const SECTIONS = {
               activitySetId: actId || null,
               skillKey,
               isCompleted: isComplete,
-              status: needsScoreRetake ? "RETAKE_SCORE" : (isComplete ? "COMPLETED" : "NEW"),
-              needsScoreRetake,
+              status: isComplete ? "COMPLETED" : "NEW",
             });
 
             if (actId) {
@@ -996,7 +851,7 @@ const SECTIONS = {
 
       if (!activity) throw new Error("Null activity payload");
 
-      if (isScoredSubmitted(activity)) {
+      if (activity.activityState === "SUBMITTED" || activity.isCompleted === true) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
@@ -1014,10 +869,7 @@ const SECTIONS = {
       if (!isPersistedSubmitted(verifyActivity)) {
         throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
       }
-      if (!isScoredSubmitted(verifyActivity)) {
-        throw new Error(`RCA submitted activity ${activitySetId} but score is 0. Open Retake Score and submit the questions manually.`);
-      }
-      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs, score " + activityScore(verifyActivity) + ")", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
@@ -1096,8 +948,7 @@ const SECTIONS = {
             }
 
             const actId = lesson.activitySetId || lesson.id || null;
-            const needsScoreRetake = lessonNeedsScoreRetake(lesson);
-            const isComplete = detectLessonCompletion(lesson) && !needsScoreRetake;
+            const isComplete = detectLessonCompletion(lesson);
             const lessonLocked = isLessonLockedForUser(lesson);
 
             if (!lessonLocked) {
@@ -1108,8 +959,7 @@ const SECTIONS = {
                 skillKey,
                 isCompleted: isComplete,
                 isLocked: lessonLocked,
-                status: needsScoreRetake ? "RETAKE_SCORE" : (isComplete ? "COMPLETED" : "NEW"),
-                needsScoreRetake,
+                status: isComplete ? "COMPLETED" : "NEW",
               });
 
               if (actId) {
@@ -1188,7 +1038,7 @@ const SECTIONS = {
 
       if (!activity) throw new Error("Null activity payload");
 
-      if (isScoredSubmitted(activity)) {
+      if (activity.activityState === "SUBMITTED" || activity.isCompleted === true) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
@@ -1206,10 +1056,7 @@ const SECTIONS = {
       if (!isPersistedSubmitted(verifyActivity)) {
         throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
       }
-      if (!isScoredSubmitted(verifyActivity)) {
-        throw new Error(`RCA submitted activity ${activitySetId} but score is 0. Open Retake Score and submit the questions manually.`);
-      }
-      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs, score " + activityScore(verifyActivity) + ")", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
@@ -1288,8 +1135,7 @@ const SECTIONS = {
             }
 
             const actId = lesson.activitySetId || lesson.id || null;
-            const needsScoreRetake = lessonNeedsScoreRetake(lesson);
-            const isComplete = detectLessonCompletion(lesson) && !needsScoreRetake;
+            const isComplete = detectLessonCompletion(lesson);
             const lessonLocked = isLessonLockedForUser(lesson);
 
             if (!lessonLocked) {
@@ -1300,8 +1146,7 @@ const SECTIONS = {
                 skillKey,
                 isCompleted: isComplete,
                 isLocked: lessonLocked,
-                status: needsScoreRetake ? "RETAKE_SCORE" : (isComplete ? "COMPLETED" : "NEW"),
-                needsScoreRetake,
+                status: isComplete ? "COMPLETED" : "NEW",
               });
 
               if (actId) {
@@ -1380,7 +1225,7 @@ const SECTIONS = {
 
       if (!activity) throw new Error("Null activity payload");
 
-      if (isScoredSubmitted(activity)) {
+      if (activity.activityState === "SUBMITTED" || activity.isCompleted === true) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
@@ -1398,10 +1243,7 @@ const SECTIONS = {
       if (!isPersistedSubmitted(verifyActivity)) {
         throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
       }
-      if (!isScoredSubmitted(verifyActivity)) {
-        throw new Error(`RCA submitted activity ${activitySetId} but score is 0. Open Retake Score and submit the questions manually.`);
-      }
-      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs, score " + activityScore(verifyActivity) + ")", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
@@ -1480,8 +1322,7 @@ const SECTIONS = {
             }
 
             const actId = lesson.activitySetId || lesson.id || null;
-            const needsScoreRetake = lessonNeedsScoreRetake(lesson);
-            const isComplete = detectLessonCompletion(lesson) && !needsScoreRetake;
+            const isComplete = detectLessonCompletion(lesson);
             const lessonLocked = isLessonLockedForUser(lesson);
 
             if (!lessonLocked) {
@@ -1492,8 +1333,7 @@ const SECTIONS = {
                 skillKey,
                 isCompleted: isComplete,
                 isLocked: lessonLocked,
-                status: needsScoreRetake ? "RETAKE_SCORE" : (isComplete ? "COMPLETED" : "NEW"),
-                needsScoreRetake,
+                status: isComplete ? "COMPLETED" : "NEW",
               });
 
               if (actId) {
@@ -1572,7 +1412,7 @@ const SECTIONS = {
 
       if (!activity) throw new Error("Null activity payload");
 
-      if (isScoredSubmitted(activity)) {
+      if (activity.activityState === "SUBMITTED" || activity.isCompleted === true) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
@@ -1590,10 +1430,7 @@ const SECTIONS = {
       if (!isPersistedSubmitted(verifyActivity)) {
         throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
       }
-      if (!isScoredSubmitted(verifyActivity)) {
-        throw new Error(`RCA submitted activity ${activitySetId} but score is 0. Open Retake Score and submit the questions manually.`);
-      }
-      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs, score " + activityScore(verifyActivity) + ")", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
@@ -1696,7 +1533,7 @@ const SECTIONS = {
 
       if (!activity) throw new Error("Null activity payload");
 
-      if (isScoredSubmitted(activity)) {
+      if (activity.activityState === "SUBMITTED" || activity.isCompleted === true) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
@@ -1714,10 +1551,7 @@ const SECTIONS = {
       if (!isPersistedSubmitted(verifyActivity)) {
         throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
       }
-      if (!isScoredSubmitted(verifyActivity)) {
-        throw new Error(`RCA submitted activity ${activitySetId} but score is 0. Open Retake Score and submit the questions manually.`);
-      }
-      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs, score " + activityScore(verifyActivity) + ")", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Ielts");
@@ -2107,7 +1941,11 @@ async function runCompleteJob(job, userSessions, rawTasks, sectionId) {
       try {
         const activity = await fetchActivityDetails(t.activitySetId, t.session.accessToken, t.session.loginId, t.session.clientInfo);
 
-        const alreadyDone = isScoredSubmitted(activity);
+        const alreadyDone = activity && (
+          activity.activityState === "SUBMITTED" ||
+          activity.activityState === "COMPLETED" ||
+          activity.isCompleted === true
+        );
 
         const allQuestions = activity.activityQuestionDetailsList || [];
         const allAlreadyCorrect = allQuestions.length > 0 && allQuestions.every(q => q.isUserAnswerCorrect === true && q.userAnswer != null);
@@ -2242,10 +2080,10 @@ const MIME = {
 };
 
 function serveStatic(req, res, pathname) {
-  if (pathname !== "/" && pathname !== "/index.html" && pathname !== "/single.html") {
+  if (pathname !== "/" && pathname !== "/index" && pathname !== "/single") {
     res.writeHead(404); res.end("Not Found"); return;
   }
-  const fileName = pathname === "/single.html" ? "single.html" : "index.html";
+  const fileName = pathname === "/single" ? "single.html" : "index.html";
   const filePath = path.join(PUBLIC, fileName);
 
   fs.readFile(filePath, (err, data) => {
@@ -2465,38 +2303,6 @@ async function handleApi(req, res, pathname) {
     } catch (error) { return sendJson(res, error.status || 502, { error: error.message || "Could not load RCA reports." }); }
   }
 
-  // READ/SUBMIT ONE ACTIVITY FOR A MANUAL RETAKE
-  if (pathname === "/api/activity" && req.method === "GET") {
-    const s = requireAuth(req, res);
-    if (!s) return;
-    const url = new URL(req.url, "http://localhost");
-    const activitySetId = String(url.searchParams.get("activitySetId") || "").trim();
-    const sectionId = String(url.searchParams.get("section") || "").trim();
-    if (!activitySetId) return sendJson(res, 400, { error: "activitySetId is required" });
-    if (!SECTIONS[sectionId]) return sendJson(res, 400, { error: "Invalid section" });
-    const access = await getSectionAccess(s.users[0]);
-    if (!access.unlocked[sectionId]) return sendJson(res, 403, { error: "This section is locked for your RCA account" });
-    try {
-      const activity = await fetchActivityDetails(activitySetId, s.users[0].accessToken, s.users[0].loginId, s.users[0].clientInfo);
-      return sendJson(res, 200, publicActivity(activity));
-    } catch (e) { return sendJson(res, e.status || 502, { error: e.message || "Activity questions could not be loaded" }); }
-  }
-
-  if (pathname === "/api/activity/submit" && req.method === "POST") {
-    const s = requireAuth(req, res);
-    if (!s) return;
-    try {
-      const body = await readJson(req);
-      const activitySetId = String(body.activitySetId || "").trim();
-      const sectionId = String(body.section || "").trim();
-      if (!activitySetId || !SECTIONS[sectionId]) return sendJson(res, 400, { error: "activitySetId and valid section are required" });
-      const access = await getSectionAccess(s.users[0]);
-      if (!access.unlocked[sectionId]) return sendJson(res, 403, { error: "This section is locked for your RCA account" });
-      const result = await runWithUserLock(s.users[0].loginId, () => submitManualActivity(s.users[0], activitySetId, body.answers || {}, null));
-      return sendJson(res, 200, { ok: true, ...result });
-    } catch (e) { return sendJson(res, e.status || 502, { error: e.message || "RCA activity submission failed" }); }
-  }
-
   // PLACEMENT TEST: available only after RCA reports LearnEnglish complete.
   if (pathname === "/api/placement" && req.method === "GET") {
     const s = requireAuth(req, res);
@@ -2528,11 +2334,6 @@ async function handleApi(req, res, pathname) {
     const packageId = body.packageId == null ? "" : String(body.packageId).trim();
     if (!levelId || !packageName || !packageId || packageName.length > 160) return sendJson(res, 400, { error: "levelId, packageName and packageId are required." });
     try {
-      const sectionId = Object.values(SECTIONS).find((item) => String(item.packageId) === packageId || item.name.toLowerCase() === packageName.toLowerCase())?.id;
-      if (!sectionId) return sendJson(res, 400, { error: "Unknown RCA package" });
-      const access = await getSectionAccess(user);
-      if (!access.unlocked[sectionId]) return sendJson(res, 403, { error: "This RCA section is locked for your account" });
-      await runWithUserLock(user.loginId, () => retryWithReauth(() => ensureScoredCertificateLevel(user, sectionId, levelId), user));
       const file = await runWithUserLock(user.loginId, () => retryWithReauth(() => rcaRequestBinary("POST", "/generate-certificate", { 
         token: user.accessToken, 
         query: { levelId, packageName, packageId }, 
@@ -2596,13 +2397,6 @@ async function handleApi(req, res, pathname) {
     const targetUsers = [s.users[0]];
 
     const rawTasks = [];
-    const rawTaskKeys = new Set();
-    const enqueueTask = (task) => {
-      const key = `${task.session.loginId}:${section}:${task.activitySetId}`;
-      if (!task.activitySetId || rawTaskKeys.has(key)) return;
-      rawTaskKeys.add(key);
-      rawTasks.push(task);
-    };
     for (const session of targetUsers) {
       let levelsToScan;
       if (section === 'ielts') {
@@ -2626,8 +2420,8 @@ async function handleApi(req, res, pathname) {
             for (const targetUnit of targetUnits) {
               if (!targetUnit.lessons) continue;
               targetUnit.lessons.forEach((lesson) => {
-                if (!lesson.isLocked && lesson.activitySetId) {
-                  enqueueTask({
+                if (!lesson.isCompleted && !lesson.isLocked && lesson.activitySetId) {
+                  rawTasks.push({
                     userName: session.name,
                     userLoginId: session.loginId,
                     skillName: lesson.skillKey || 'SKILL',
@@ -2645,7 +2439,7 @@ async function handleApi(req, res, pathname) {
 
           for (const key of skillKeys) {
             const skillData = data.skills[key];
-            if (!skillData || !skillData.activitySetIds) continue;
+            if (!skillData || skillData.completed || !skillData.activitySetIds) continue;
 
             let activityIds = skillData.activitySetIds || [];
             if (activitySetId) {
@@ -2653,7 +2447,7 @@ async function handleApi(req, res, pathname) {
             }
 
             activityIds.forEach((actId) => {
-              enqueueTask({
+              rawTasks.push({
                 userName: session.name,
                 userLoginId: session.loginId,
                 skillName: key,
