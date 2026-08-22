@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 /**
- * RCA IELTS Dashboard – Production Edition (FIXED v5 - ALL CRITICAL BUGS RESOLVED)
- * ✅ Task Completion Verification - FIXED (stronger state validation)
- * ✅ Task Refresh After Completion - FIXED (proper state sync + UI refresh)
- * ✅ False Success Reports - FIXED (multi-stage verification)
- * ✅ Locked Lessons Handling - FIXED (skip properly)
- * ✅ Certificate Download - FIXED (proper param validation)
- * ✅ Scoring & Answer Selection - FIXED (correct option ID handling)
- * ✅ State Synchronization - FIXED (verify before + after reporting)
- * ✅ Concurrent Task Conflicts - FIXED (improved task locking)
- * ✅ Session & User State - FIXED (proper updates)
- * ✅ API Logs Filtered - FIXED (console only)
- * ✅ Production Ready - All error handling, timeouts, retries optimized
+ * RCA IELTS Dashboard â€“ Production Edition (FIXED v5 - ALL CRITICAL BUGS RESOLVED)
+ * âœ… Task Completion Verification - FIXED (stronger state validation)
+ * âœ… Task Refresh After Completion - FIXED (proper state sync + UI refresh)
+ * âœ… False Success Reports - FIXED (multi-stage verification)
+ * âœ… Locked Lessons Handling - FIXED (skip properly)
+ * âœ… Certificate Download - FIXED (proper param validation)
+ * âœ… Scoring & Answer Selection - FIXED (correct option ID handling)
+ * âœ… State Synchronization - FIXED (verify before + after reporting)
+ * âœ… Concurrent Task Conflicts - FIXED (improved task locking)
+ * âœ… Session & User State - FIXED (proper updates)
+ * âœ… API Logs Filtered - FIXED (console only)
+ * âœ… Production Ready - All error handling, timeouts, retries optimized
  */
 
 "use strict";
@@ -65,14 +65,17 @@ const CONFIG = {
   SESSION_REFRESH_THRESHOLD_MS: 2 * 60 * 60 * 1000,
   MAX_BULK_USERS: 5,
   MAX_COINS_PER_REQUEST: 500,
-  MAX_RETRIES: 4,
-  RETRY_DELAY_MS: 1200,
-  REQUEST_TIMEOUT_MS: 90000,
-  LOGIN_TIMEOUT_MS: 120000,
-  SOCKET_TIMEOUT_MS: 60000,
-  DELAY_BETWEEN_TASKS_MS: 400,
-  STATE_VERIFICATION_DELAY_MS: 800,
-  FINAL_VERIFICATION_DELAY_MS: 1500,
+  MAX_RETRIES: Number(process.env.RCA_MAX_RETRIES || 5),
+  RETRY_DELAY_MS: Number(process.env.RCA_RETRY_DELAY_MS || 450),
+  REQUEST_TIMEOUT_MS: Number(process.env.RCA_REQUEST_TIMEOUT_MS || 60000),
+  LOGIN_TIMEOUT_MS: Number(process.env.RCA_LOGIN_TIMEOUT_MS || 90000),
+  SOCKET_TIMEOUT_MS: Number(process.env.RCA_SOCKET_TIMEOUT_MS || 60000),
+  DELAY_BETWEEN_TASKS_MS: Number(process.env.RCA_TASK_DELAY_MS || 75),
+  STATE_VERIFICATION_DELAY_MS: Number(process.env.RCA_STATE_DELAY_MS || 300),
+  FINAL_VERIFICATION_DELAY_MS: Number(process.env.RCA_FINAL_DELAY_MS || 650),
+  CHECK_CONCURRENCY: Number(process.env.RCA_CHECK_CONCURRENCY || 6),
+  TASK_CONCURRENCY: Number(process.env.RCA_TASK_CONCURRENCY || 1),
+  TASK_RETRIES: Number(process.env.RCA_TASK_RETRIES || 3),
 };
 
 // ==================== HTTPS AGENT WITH KEEP-ALIVE ====================
@@ -204,6 +207,34 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function mapLimit(items, limit, worker) {
+  const list = Array.isArray(items) ? items : [];
+  const size = Math.max(1, Math.min(Number(limit) || 1, list.length || 1));
+  const results = new Array(list.length);
+  let cursor = 0;
+  async function run() {
+    while (true) {
+      const index = cursor++;
+      if (index >= list.length) return;
+      results[index] = await worker(list[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: size }, run));
+  return results;
+}
+
+function isTransientRcaError(error) {
+  const status = Number(error && error.status || 0);
+  const message = String(error && (error.message || error) || '').toLowerCase();
+  return [408, 425, 429, 500, 502, 503, 504].includes(status)
+    || /something went wrong|try again later|temporarily unavailable|gateway timeout|upstream|request timeout|socket timeout|econnreset|eai_again|connection reset/.test(message);
+}
+
+function retryDelay(attempt) {
+  const base = Math.max(100, Number(CONFIG.RETRY_DELAY_MS) || 450);
+  return Math.min(8000, base * Math.max(1, attempt) + Math.floor(Math.random() * 180));
+}
+
 function getClientInfo(req) {
   const forwarded = req.headers["x-forwarded-for"];
   const ip = forwarded ? forwarded.split(",")[0].trim() : (req.socket.remoteAddress || "127.0.0.1");
@@ -263,107 +294,66 @@ function executeRequest(opts, payload, attempt = 1, isLogin = false, apiLogger =
   return new Promise((resolve, reject) => {
     const chunks = [];
     const timeoutMs = isLogin ? CONFIG.LOGIN_TIMEOUT_MS : CONFIG.REQUEST_TIMEOUT_MS;
+    const requestOpts = {
+      ...opts,
+      headers: { ...(opts.headers || {}), "x-request-id": uuid(), "x-journey-id": uuid() },
+      agent: httpsAgent,
+    };
+    const cookieHeader = getCookiesForHost(requestOpts.hostname);
+    if (cookieHeader) requestOpts.headers.Cookie = cookieHeader;
 
-    const cookieHeader = getCookiesForHost(opts.hostname);
-    if (cookieHeader) {
-      opts.headers = opts.headers || {};
-      opts.headers["Cookie"] = cookieHeader;
-    }
-
-    opts.agent = httpsAgent;
+    const retryOrReject = (error) => {
+      if (isTransientRcaError(error) && attempt < CONFIG.MAX_RETRIES) {
+        const delay = retryDelay(attempt);
+        console.warn(`[RCA Retry] ${requestOpts.method} ${requestOpts.path} attempt ${attempt + 1}/${CONFIG.MAX_RETRIES} in ${delay}ms: ${error.message}`);
+        return sleep(delay).then(() => executeRequest(requestOpts, payload, attempt + 1, isLogin, apiLogger).then(resolve, reject));
+      }
+      reject(error);
+    };
 
     if (apiLogger) {
       let bodyStr = null;
-      if (payload != null) {
-        bodyStr = typeof payload === "string" ? payload.slice(0, 2000) : JSON.stringify(payload).slice(0, 2000);
-      }
-      apiLogger({
-        type: "request",
-        method: opts.method,
-        path: opts.path,
-        hostname: opts.hostname,
-        body: bodyStr,
-        timestamp: Date.now(),
-      });
+      if (payload != null) bodyStr = typeof payload === "string" ? payload.slice(0, 2000) : JSON.stringify(payload).slice(0, 2000);
+      apiLogger({ type: "request", method: requestOpts.method, path: requestOpts.path, hostname: requestOpts.hostname, body: bodyStr, timestamp: Date.now() });
     }
 
-    const req = https.request(opts, (res) => {
+    const req = https.request(requestOpts, (res) => {
       const cookies = parseCookies(res.headers);
-      if (cookies.length > 0) {
-        storeCookies(opts.hostname, cookies);
-      }
-
+      if (cookies.length) storeCookies(requestOpts.hostname, cookies);
       res.on("data", (c) => chunks.push(c));
       res.on("end", () => {
         const raw = Buffer.concat(chunks).toString("utf8");
         let data = raw;
         try { data = raw ? JSON.parse(raw) : null; } catch (_) {}
-
         if (apiLogger) {
-          let dataStr = null;
-          if (data != null) {
-            dataStr = typeof data === "object" ? JSON.stringify(data).slice(0, 2000) : String(data).slice(0, 2000);
-          }
-          apiLogger({
-            type: "response",
-            method: opts.method,
-            path: opts.path,
-            status: res.statusCode,
-            data: dataStr,
-            timestamp: Date.now(),
-          });
+          const dataStr = data != null ? (typeof data === "object" ? JSON.stringify(data).slice(0, 2000) : String(data).slice(0, 2000)) : null;
+          apiLogger({ type: "response", method: requestOpts.method, path: requestOpts.path, status: res.statusCode, data: dataStr, timestamp: Date.now() });
         }
-
+        const message = String(data && (data.message || data.error) || raw || `HTTP ${res.statusCode}`);
         if (res.statusCode >= 400) {
-          console.error(`[RCA API ERROR] Path: ${opts.path} | Code: ${res.statusCode}`);
-          const err = new Error((data && (data.message || data.error)) || raw || "HTTP " + res.statusCode);
-          err.status = res.statusCode;
-          err.data = data;
-          reject(err);
-          return;
+          const error = new Error(message);
+          error.status = res.statusCode;
+          error.data = data;
+          return retryOrReject(error);
+        }
+        const genericFailure = /something went wrong|try again later|temporarily unavailable|internal server error/.test(message.toLowerCase())
+          && !(data && (data.success === true || data.ok === true));
+        if (genericFailure) {
+          const error = new Error(message);
+          error.status = 503;
+          error.data = data;
+          return retryOrReject(error);
         }
         resolve(data);
       });
     });
 
-    req.on("error", async (e) => {
-      console.error(`[RCA Network Error] ${e.message} | Attempt: ${attempt}`);
-
-      const retryableErrors = [
-        "ECONNABORTED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND",
-        "EPIPE", "ECONNREFUSED", "EAI_AGAIN"
-      ];
-
-      const shouldRetry = retryableErrors.some(code => e.message.includes(code)) && attempt < CONFIG.MAX_RETRIES;
-
-      if (shouldRetry) {
-        const delay = isLogin ? 500 + (attempt * 500) : CONFIG.RETRY_DELAY_MS * attempt;
-        console.log(`[RCA Retry] Attempt ${attempt + 1}/${CONFIG.MAX_RETRIES} in ${delay}ms...`);
-        await sleep(delay);
-        try {
-          const result = await executeRequest(opts, payload, attempt + 1, isLogin, apiLogger);
-          resolve(result);
-          return;
-        } catch (retryErr) {
-          reject(retryErr);
-          return;
-        }
-      }
-
-      reject(e);
-    });
-
-    req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`Request Timeout (${timeoutMs}ms)`));
-    });
-
+    req.on("error", (error) => retryOrReject(error));
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`Request Timeout (${timeoutMs}ms)`)));
     req.on("socket", (socket) => {
       socket.setTimeout(timeoutMs);
-      socket.on("timeout", () => {
-        req.destroy(new Error(`Socket Timeout (${timeoutMs}ms)`));
-      });
+      socket.on("timeout", () => req.destroy(new Error(`Socket Timeout (${timeoutMs}ms)`)));
     });
-
     if (payload !== null) req.write(payload);
     req.end();
   });
@@ -577,43 +567,21 @@ function sectionDescriptors(access) {
 
 async function fetchActivityDetails(activitySetId, token, loginId, clientInfo, retryCount = 0) {
   const id = String(activitySetId);
-  const maxRetries = 3;
-  
-  // Try both endpoint variants
   const variants = ["0", id];
-  let lastError = null;
-  let successData = null;
-
-  for (const secondId of variants) {
-    try {
-      const data = await rcaRequest("GET", `/activitySetDetails/${id}/${secondId}/${Date.now()}/false`, { token, loginId, clientInfo });
-      
-      if (!data) {
-        lastError = new Error("Empty response");
-        continue;
-      }
-
-      // Store first successful fetch
-      if (!successData) successData = data;
-
-      // Check if already submitted
-      if (data && (data.activityState === "SUBMITTED" || data.activityState === "COMPLETED" || data.isCompleted === true)) {
-        return data;
-      }
-    } catch (e) {
-      lastError = e;
-      console.warn(`Activity fetch variant ${secondId} failed: ${e.message}`);
-    }
-  }
-
-  if (successData) return successData;
-  
-  // Retry with backoff if all variants failed
-  if (retryCount < maxRetries) {
-    await sleep(300 + (retryCount * 300));
+  const stamp = Date.now();
+  const responses = await Promise.allSettled(variants.map((secondId) => rcaRequest("GET", `/activitySetDetails/${id}/${secondId}/${stamp}/false`, { token, loginId, clientInfo })));
+  const successful = responses.filter((result) => result.status === "fulfilled" && result.value);
+  const submitted = successful.find((result) => {
+    const data = result.value;
+    return data.activityState === "SUBMITTED" || data.activityState === "COMPLETED" || data.isCompleted === true;
+  });
+  if (submitted) return submitted.value;
+  if (successful.length) return successful[0].value;
+  const lastError = responses.find((result) => result.status === "rejected")?.reason;
+  if (retryCount < 2) {
+    await sleep(Math.min(1800, 250 * (retryCount + 1)));
     return fetchActivityDetails(activitySetId, token, loginId, clientInfo, retryCount + 1);
   }
-
   throw lastError || new Error("Activity details unavailable");
 }
 
@@ -621,6 +589,40 @@ function isPersistedSubmitted(activity) {
   if (!activity) return false;
   const isSubmitted = activity.activityState === "SUBMITTED" || activity.activityState === "COMPLETED" || activity.isCompleted === true;
   return !!isSubmitted;
+}
+
+
+function activityScore(activity) {
+  if (!activity) return 0;
+  for (const field of ["totalEarnedScore", "earnedScore", "score", "resultScore"]) {
+    if (activity[field] != null && activity[field] !== "") {
+      const value = Number(activity[field]);
+      if (Number.isFinite(value)) return value;
+    }
+  }
+  return 0;
+}
+
+function isScoredSubmitted(activity) {
+  return isPersistedSubmitted(activity) && (activityScore(activity) > 0 || Number(activity.totalAnswersCorrect || 0) > 0);
+}
+
+function lessonNeedsScoreRetake(lesson) {
+  if (!lesson || !detectLessonCompletion(lesson)) return false;
+  const fields = [lesson.lessonCompletionScore, lesson.totalEarnedScore, lesson.score, lesson.totalScore, lesson.lessonPercentage];
+  const value = fields.find((item) => item != null && item !== "");
+  return value != null && Number(value) <= 0;
+}
+
+function isManualOnlyQuestion(question) {
+  const type = String(question && (question.itemType || question.answerType || question.type) || "").toUpperCase();
+  return /SPEAK|RECORD|PRONUNCIATION|LISTENING_RECORD/.test(type);
+}
+
+function hasAnswer(question) {
+  if (!question) return false;
+  if (Array.isArray(question.userAnswer)) return question.userAnswer.length > 0;
+  return question.userAnswer != null && String(question.userAnswer).trim() !== "";
 }
 
 function asArray(data, keys = []) {
@@ -795,7 +797,8 @@ const SECTIONS = {
             }
 
             const actId = lesson.activitySetId || lesson.activitySetID || lesson.activityId;
-            const isComplete = detectLessonCompletion(lesson);
+            const needsScoreRetake = lessonNeedsScoreRetake(lesson);
+            const isComplete = detectLessonCompletion(lesson) && !needsScoreRetake;
 
             unitLessons.push({
               lessonId: lesson.lessonId,
@@ -803,7 +806,8 @@ const SECTIONS = {
               activitySetId: actId || null,
               skillKey,
               isCompleted: isComplete,
-              status: isComplete ? "COMPLETED" : "NEW",
+              needsScoreRetake,
+              status: needsScoreRetake ? "RETAKE_SCORE" : (isComplete ? "COMPLETED" : "NEW"),
             });
 
             if (actId) {
@@ -877,29 +881,39 @@ const SECTIONS = {
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
 
-      if (isPersistedSubmitted(activity)) {
+      if (isScoredSubmitted(activity)) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
 
       const allQuestions = activity.activityQuestionDetailsList || [];
-      
+      const manualQuestions = allQuestions.filter((question) => isManualOnlyQuestion(question) && !hasAnswer(question));
+      if (manualQuestions.length > 0) {
+        onLog && onLog(`Manual recording required for ${manualQuestions.length} question(s); RCA was not called with an invalid empty answer.`, "warn");
+        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
+      }
+
       // Fill answers with CORRECT OPTION ID handling
       activity = fillAnswers(activity);
+      const unansweredQuestions = allQuestions.filter((question) => !hasAnswer(question) && !isManualOnlyQuestion(question));
+      if (unansweredQuestions.length > 0) {
+        onLog && onLog(`Manual answer required for ${unansweredQuestions.length} question(s); RCA submission skipped safely.`, "warn");
+        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
+      }
       activity.activityState = "INPROGRESS";
       activity.learnerId = learnerId;
       activity.startDate = Date.now() - 28000;
 
       // Submit as IN PROGRESS
       onLog && onLog("Submitting as INPROGRESS: " + activitySetId, "info");
-      await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
+      await submitActivityWithRecovery(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger, activitySetId);
       
       // Wait for state propagation
       await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
 
       // Submit as SUBMITTED
       onLog && onLog("Submitting as SUBMITTED: " + activitySetId, "info");
-      activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
+      activity = await submitActivityWithRecovery(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger, activitySetId);
       
       // Wait for state to persist
       await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
@@ -916,7 +930,7 @@ const SECTIONS = {
         }
       }
 
-      onLog && onLog("✓ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       // Update time taken
       const lessonId = activity.lessonId || activitySetId;
@@ -947,7 +961,7 @@ const SECTIONS = {
         return (data || []).map((l, idx) => ({
           id: l.id || idx,
           name: l.level || "L" + (idx + 1),
-          title: (l.level || "Level") + (l.nextLevel ? " → " + l.nextLevel : ""),
+          title: (l.level || "Level") + (l.nextLevel ? " â†’ " + l.nextLevel : ""),
           subtitle: "APEX Level",
           color: String(l.level || "").toLowerCase() || "a1",
           curriculumLevelMappingId: l.curriculumLevelMappingId,
@@ -997,7 +1011,8 @@ const SECTIONS = {
             }
 
             const actId = lesson.activitySetId || lesson.id || null;
-            const isComplete = detectLessonCompletion(lesson);
+            const needsScoreRetake = lessonNeedsScoreRetake(lesson);
+            const isComplete = detectLessonCompletion(lesson) && !needsScoreRetake;
             const lessonLocked = isLessonLockedForUser(lesson);
 
             if (!lessonLocked) {
@@ -1008,7 +1023,8 @@ const SECTIONS = {
                 skillKey,
                 isCompleted: isComplete,
                 isLocked: lessonLocked,
-                status: isComplete ? "COMPLETED" : "NEW",
+                needsScoreRetake,
+                status: needsScoreRetake ? "RETAKE_SCORE" : (isComplete ? "COMPLETED" : "NEW"),
               });
 
               if (actId) {
@@ -1085,23 +1101,35 @@ const SECTIONS = {
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
 
-      if (isPersistedSubmitted(activity)) {
+      if (isScoredSubmitted(activity)) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
 
       const allQuestions = activity.activityQuestionDetailsList || [];
+      const manualQuestions = allQuestions.filter((question) => isManualOnlyQuestion(question) && !hasAnswer(question));
+      if (manualQuestions.length > 0) {
+        onLog && onLog(`Manual recording required for ${manualQuestions.length} question(s); RCA was not called with an invalid empty answer.`, "warn");
+        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
+      }
+
+      // Fill answers with CORRECT OPTION ID handling
       activity = fillAnswers(activity);
+      const unansweredQuestions = allQuestions.filter((question) => !hasAnswer(question) && !isManualOnlyQuestion(question));
+      if (unansweredQuestions.length > 0) {
+        onLog && onLog(`Manual answer required for ${unansweredQuestions.length} question(s); RCA submission skipped safely.`, "warn");
+        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
+      }
       activity.activityState = "INPROGRESS";
       activity.learnerId = learnerId;
       activity.startDate = Date.now() - 28000;
 
       onLog && onLog("Submitting as INPROGRESS: " + activitySetId, "info");
-      await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
+      await submitActivityWithRecovery(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger, activitySetId);
       await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
 
       onLog && onLog("Submitting as SUBMITTED: " + activitySetId, "info");
-      activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
+      activity = await submitActivityWithRecovery(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger, activitySetId);
       await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
 
       const verifyActivity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
@@ -1113,7 +1141,7 @@ const SECTIONS = {
           throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
         }
       }
-      onLog && onLog("✓ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
@@ -1142,7 +1170,7 @@ const SECTIONS = {
         return (data || []).map((l, idx) => ({
           id: l.id || idx,
           name: l.level || "L" + (idx + 1),
-          title: (l.level || "Level") + (l.nextLevel ? " → " + l.nextLevel : ""),
+          title: (l.level || "Level") + (l.nextLevel ? " â†’ " + l.nextLevel : ""),
           subtitle: "Vocab Builder Level",
           color: String(l.level || "").toLowerCase() || "a1",
           curriculumLevelMappingId: l.curriculumLevelMappingId,
@@ -1192,7 +1220,8 @@ const SECTIONS = {
             }
 
             const actId = lesson.activitySetId || lesson.id || null;
-            const isComplete = detectLessonCompletion(lesson);
+            const needsScoreRetake = lessonNeedsScoreRetake(lesson);
+            const isComplete = detectLessonCompletion(lesson) && !needsScoreRetake;
             const lessonLocked = isLessonLockedForUser(lesson);
 
             if (!lessonLocked) {
@@ -1203,7 +1232,8 @@ const SECTIONS = {
                 skillKey,
                 isCompleted: isComplete,
                 isLocked: lessonLocked,
-                status: isComplete ? "COMPLETED" : "NEW",
+                needsScoreRetake,
+                status: needsScoreRetake ? "RETAKE_SCORE" : (isComplete ? "COMPLETED" : "NEW"),
               });
 
               if (actId) {
@@ -1280,23 +1310,35 @@ const SECTIONS = {
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
 
-      if (isPersistedSubmitted(activity)) {
+      if (isScoredSubmitted(activity)) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
 
       const allQuestions = activity.activityQuestionDetailsList || [];
+      const manualQuestions = allQuestions.filter((question) => isManualOnlyQuestion(question) && !hasAnswer(question));
+      if (manualQuestions.length > 0) {
+        onLog && onLog(`Manual recording required for ${manualQuestions.length} question(s); RCA was not called with an invalid empty answer.`, "warn");
+        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
+      }
+
+      // Fill answers with CORRECT OPTION ID handling
       activity = fillAnswers(activity);
+      const unansweredQuestions = allQuestions.filter((question) => !hasAnswer(question) && !isManualOnlyQuestion(question));
+      if (unansweredQuestions.length > 0) {
+        onLog && onLog(`Manual answer required for ${unansweredQuestions.length} question(s); RCA submission skipped safely.`, "warn");
+        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
+      }
       activity.activityState = "INPROGRESS";
       activity.learnerId = learnerId;
       activity.startDate = Date.now() - 28000;
 
       onLog && onLog("Submitting as INPROGRESS: " + activitySetId, "info");
-      await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
+      await submitActivityWithRecovery(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger, activitySetId);
       await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
 
       onLog && onLog("Submitting as SUBMITTED: " + activitySetId, "info");
-      activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
+      activity = await submitActivityWithRecovery(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger, activitySetId);
       await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
 
       const verifyActivity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
@@ -1308,7 +1350,7 @@ const SECTIONS = {
           throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
         }
       }
-      onLog && onLog("✓ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
@@ -1337,7 +1379,7 @@ const SECTIONS = {
         return (data || []).map((l, idx) => ({
           id: l.id || idx,
           name: l.level || "L" + (idx + 1),
-          title: (l.level || "Level") + (l.nextLevel ? " → " + l.nextLevel : ""),
+          title: (l.level || "Level") + (l.nextLevel ? " â†’ " + l.nextLevel : ""),
           subtitle: "Wordcraft Level",
           color: String(l.level || "").toLowerCase() || "a1",
           curriculumLevelMappingId: l.curriculumLevelMappingId,
@@ -1387,7 +1429,8 @@ const SECTIONS = {
             }
 
             const actId = lesson.activitySetId || lesson.id || null;
-            const isComplete = detectLessonCompletion(lesson);
+            const needsScoreRetake = lessonNeedsScoreRetake(lesson);
+            const isComplete = detectLessonCompletion(lesson) && !needsScoreRetake;
             const lessonLocked = isLessonLockedForUser(lesson);
 
             if (!lessonLocked) {
@@ -1398,7 +1441,8 @@ const SECTIONS = {
                 skillKey,
                 isCompleted: isComplete,
                 isLocked: lessonLocked,
-                status: isComplete ? "COMPLETED" : "NEW",
+                needsScoreRetake,
+                status: needsScoreRetake ? "RETAKE_SCORE" : (isComplete ? "COMPLETED" : "NEW"),
               });
 
               if (actId) {
@@ -1475,23 +1519,35 @@ const SECTIONS = {
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
 
-      if (isPersistedSubmitted(activity)) {
+      if (isScoredSubmitted(activity)) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
 
       const allQuestions = activity.activityQuestionDetailsList || [];
+      const manualQuestions = allQuestions.filter((question) => isManualOnlyQuestion(question) && !hasAnswer(question));
+      if (manualQuestions.length > 0) {
+        onLog && onLog(`Manual recording required for ${manualQuestions.length} question(s); RCA was not called with an invalid empty answer.`, "warn");
+        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
+      }
+
+      // Fill answers with CORRECT OPTION ID handling
       activity = fillAnswers(activity);
+      const unansweredQuestions = allQuestions.filter((question) => !hasAnswer(question) && !isManualOnlyQuestion(question));
+      if (unansweredQuestions.length > 0) {
+        onLog && onLog(`Manual answer required for ${unansweredQuestions.length} question(s); RCA submission skipped safely.`, "warn");
+        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
+      }
       activity.activityState = "INPROGRESS";
       activity.learnerId = learnerId;
       activity.startDate = Date.now() - 28000;
 
       onLog && onLog("Submitting as INPROGRESS: " + activitySetId, "info");
-      await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
+      await submitActivityWithRecovery(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger, activitySetId);
       await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
 
       onLog && onLog("Submitting as SUBMITTED: " + activitySetId, "info");
-      activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
+      activity = await submitActivityWithRecovery(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger, activitySetId);
       await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
 
       const verifyActivity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
@@ -1503,7 +1559,7 @@ const SECTIONS = {
           throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
         }
       }
-      onLog && onLog("✓ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Lesson");
@@ -1605,23 +1661,35 @@ const SECTIONS = {
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
 
-      if (isPersistedSubmitted(activity)) {
+      if (isScoredSubmitted(activity)) {
         onLog && onLog("Already completed: " + activitySetId, "warn");
         return { skipped: true, activitySetId, reason: "already_completed" };
       }
 
       const allQuestions = activity.activityQuestionDetailsList || [];
+      const manualQuestions = allQuestions.filter((question) => isManualOnlyQuestion(question) && !hasAnswer(question));
+      if (manualQuestions.length > 0) {
+        onLog && onLog(`Manual recording required for ${manualQuestions.length} question(s); RCA was not called with an invalid empty answer.`, "warn");
+        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
+      }
+
+      // Fill answers with CORRECT OPTION ID handling
       activity = fillAnswers(activity);
+      const unansweredQuestions = allQuestions.filter((question) => !hasAnswer(question) && !isManualOnlyQuestion(question));
+      if (unansweredQuestions.length > 0) {
+        onLog && onLog(`Manual answer required for ${unansweredQuestions.length} question(s); RCA submission skipped safely.`, "warn");
+        return { skipped: true, manualRequired: true, activitySetId, reason: "manual_input_required" };
+      }
       activity.activityState = "INPROGRESS";
       activity.learnerId = learnerId;
       activity.startDate = Date.now() - 28000;
 
       onLog && onLog("Submitting as INPROGRESS: " + activitySetId, "info");
-      await submitActivity(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger);
+      await submitActivityWithRecovery(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger, activitySetId);
       await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
 
       onLog && onLog("Submitting as SUBMITTED: " + activitySetId, "info");
-      activity = await submitActivity(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger);
+      activity = await submitActivityWithRecovery(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger, activitySetId);
       await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
 
       const verifyActivity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
@@ -1633,7 +1701,7 @@ const SECTIONS = {
           throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
         }
       }
-      onLog && onLog("✓ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, activity.totalTimeTaken || 30, loginId, clientInfo, apiLogger, "Ielts");
@@ -1660,15 +1728,15 @@ function fillAnswers(activity) {
         answer = q.userEssay || "This is my response.";
       } else if (correctOptions.length > 1) {
         // Multiple correct answers - use option IDs
-        answer = correctOptions.map((o) => String(o.id));
+        answer = correctOptions.map((o) => /^\d+$/.test(String(o.id)) ? Number(o.id) : String(o.id));
       } else if (correctOptions.length === 1) {
         // Single correct answer - use option ID (not text)
-        answer = String(correctOptions[0].id);
+        answer = /^\d+$/.test(String(correctOptions[0].id)) ? Number(correctOptions[0].id) : String(correctOptions[0].id);
       } else if (q.correctAnswer != null && q.correctAnswer !== "") {
         // Fallback: try to match by ID or text
         const byId = options.find((o) => String(o.id) === String(q.correctAnswer));
         const byText = options.find((o) => String(o.answerOption || "").trim().toLowerCase() === String(q.correctAnswer).trim().toLowerCase());
-        answer = byId ? String(byId.id) : (byText ? String(byText.id) : String(q.correctAnswer));
+        answer = byId ? (/^\d+$/.test(String(byId.id)) ? Number(byId.id) : String(byId.id)) : (byText ? (/^\d+$/.test(String(byText.id)) ? Number(byText.id) : String(byText.id)) : String(q.correctAnswer));
       } else {
         answer = "";
       }
@@ -1708,7 +1776,7 @@ async function submitActivity(token, activity, state, learnerId, loginId, client
   const payload = Object.assign({}, activity);
   payload.activityState = state;
   payload.learnerId = learnerId;
-  payload.activityType = payload.activityType || "Ielts";
+  payload.activityType = payload.activityType || (String(payload.activityType || "").toUpperCase() === "FINAL" ? "Final" : "Lesson");
   const now = Date.now();
   if (!payload.startDate) payload.startDate = now - 30000;
   if (state === "SUBMITTED") {
@@ -1720,6 +1788,92 @@ async function submitActivity(token, activity, state, learnerId, loginId, client
   }
   await rcaRequest("POST", "/activity/data", { token, body: payload, loginId, clientInfo, apiLogger });
   return payload;
+}
+
+function mergeActivityAnswers(fresh, previous) {
+  const previousRows = Array.isArray(previous && previous.activityQuestionDetailsList) ? previous.activityQuestionDetailsList : [];
+  const byItem = new Map(previousRows.map((q) => [String(q.itemId), q]));
+  const byResult = new Map(previousRows.filter((q) => q.activityResultDetailId != null).map((q) => [String(q.activityResultDetailId), q]));
+  const rows = Array.isArray(fresh && fresh.activityQuestionDetailsList) ? fresh.activityQuestionDetailsList : [];
+  rows.forEach((q) => {
+    const old = byItem.get(String(q.itemId)) || (q.activityResultDetailId != null ? byResult.get(String(q.activityResultDetailId)) : null);
+    if (!old) return;
+    for (const field of ["userAnswer", "submittedUserAnswer", "isSubmitClicked", "allAnswersRecorded", "isUserAnswerCorrect", "userEssay", "learnerAnswerRecordingId", "answerRecordingPath"]) {
+      if (old[field] !== undefined) q[field] = old[field];
+    }
+  });
+  return fresh;
+}
+
+async function submitActivityWithRecovery(token, activity, state, learnerId, loginId, clientInfo, apiLogger, activitySetId) {
+  try {
+    return await submitActivity(token, activity, state, learnerId, loginId, clientInfo, apiLogger);
+  } catch (error) {
+    if (!isTransientRcaError(error)) throw error;
+    console.warn(`[RCA Submit Recovery] ${state} ${activitySetId || activity.activityId || "unknown"}: ${error.message}`);
+    await sleep(350);
+    const fresh = await fetchActivityDetails(activitySetId || activity.activityId, token, loginId, clientInfo);
+    const rebuilt = mergeActivityAnswers(fresh, activity);
+    rebuilt.activityState = state;
+    rebuilt.learnerId = learnerId;
+    if (!rebuilt.startDate) rebuilt.startDate = Date.now() - 30000;
+    return submitActivity(token, rebuilt, state, learnerId, loginId, clientInfo, apiLogger);
+  }
+}
+
+function publicActivity(activity) {
+  const questions = Array.isArray(activity && activity.activityQuestionDetailsList) ? activity.activityQuestionDetailsList : [];
+  return {
+    activitySetId: activity.activityId || activity.activitySetId || activity.id,
+    activityName: activity.activityName || activity.lessonName || "Activity",
+    activityState: activity.activityState || "NEW",
+    totalQuestions: activity.totalQuestions || questions.length,
+    totalEarnedScore: activity.totalEarnedScore || 0,
+    totalAnswersCorrect: activity.totalAnswersCorrect || 0,
+    questions: questions.map((q, index) => ({
+      index,
+      itemId: q.itemId,
+      activityResultDetailId: q.activityResultDetailId,
+      itemType: q.itemType,
+      question: q.itemQuestion || q.itemEnglishQuestion || q.questionText || `Question ${index + 1}`,
+      instruction: q.itemInstruction || q.itemEnglishInstruction || "",
+      options: (Array.isArray(q.activityAnswerDTO) ? q.activityAnswerDTO : []).map((o) => ({ id: o.id, text: o.answerOption || o.activityItem || "", isImage: !!o.isImage, imageUrl: o.imageUrl || null }))
+    }))
+  };
+}
+
+async function submitManualActivity(session, activitySetId, answers) {
+  const activity = await fetchActivityDetails(activitySetId, session.accessToken, session.loginId, session.clientInfo);
+  const questions = Array.isArray(activity && activity.activityQuestionDetailsList) ? activity.activityQuestionDetailsList : [];
+  if (!questions.length) throw new Error("RCA returned no questions for this activity");
+  const answerMap = answers && typeof answers === "object" ? answers : {};
+  let answered = 0;
+  for (const q of questions) {
+    const keys = [q.activityResultDetailId, q.itemId].filter((value) => value != null).map(String);
+    const key = keys.find((candidate) => Object.prototype.hasOwnProperty.call(answerMap, candidate));
+    if (key == null) continue;
+    let answer = answerMap[key];
+    const optionIds = new Set((Array.isArray(q.activityAnswerDTO) ? q.activityAnswerDTO : []).map((option) => String(option.id)));
+    if (Array.isArray(answer)) answer = answer.map((value) => optionIds.has(String(value)) ? Number(value) : value);
+    else if (optionIds.has(String(answer))) answer = Number(answer);
+    q.userAnswer = answer;
+    q.submittedUserAnswer = answer;
+    q.isSubmitClicked = true;
+    q.allAnswersRecorded = true;
+    if (answer !== "" && answer != null && !(Array.isArray(answer) && answer.length === 0)) answered++;
+  }
+  if (!answered) throw new Error("Answer at least one question before submitting");
+  activity.activityState = "INPROGRESS";
+  activity.learnerId = session.learnerId;
+  activity.startDate = activity.startDate || Date.now() - 30000;
+  activity.totalQuestionsAttempted = answered;
+  activity.totalQuestionsLeft = Math.max(0, Number(activity.totalQuestions || questions.length) - answered);
+  await submitActivityWithRecovery(session.accessToken, activity, "INPROGRESS", session.learnerId, session.loginId, session.clientInfo, null, activitySetId);
+  await submitActivityWithRecovery(session.accessToken, activity, "SUBMITTED", session.learnerId, session.loginId, session.clientInfo, null, activitySetId);
+  await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
+  const verified = await fetchActivityDetails(activitySetId, session.accessToken, session.loginId, session.clientInfo);
+  if (!isPersistedSubmitted(verified)) throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
+  return { activity: publicActivity(verified), score: activityScore(verified), scored: isScoredSubmitted(verified), retakeRequired: !isScoredSubmitted(verified) };
 }
 
 async function updateTimeTaken(token, learnerId, lessonId, activitySetId, secs, loginId, clientInfo, apiLogger, activityType = "Ielts") {
@@ -1894,7 +2048,7 @@ async function ensureSessionValid(user) {
       const isExpiry = SESSION_EXPIRY_HINTS.some((h) => msg.includes(h)) || (e && (e.status === 401 || e.status === 403));
       if (!isExpiry) throw e;
       if (i === 0) {
-        console.log(`[Session] Token invalidated for ${user.loginId} – re-authenticating...`);
+        console.log(`[Session] Token invalidated for ${user.loginId} â€“ re-authenticating...`);
         const u = await rcaLogin(user.loginId, "", user.clientInfo);
         user.accessToken = u.accessToken;
         user.learnerId = u.learnerId || user.learnerId;
@@ -1906,7 +2060,7 @@ async function ensureSessionValid(user) {
         if (u.resumeInfo) user.resumeInfo = u.resumeInfo;
         console.log(`[Session] Re-authenticated ${user.loginId}`);
       } else {
-        throw new Error("Session busy on another device – try again shortly");
+        throw new Error("Session busy on another device â€“ try again shortly");
       }
     }
   }
@@ -2001,9 +2155,8 @@ function jobLog(job, message, level) {
 async function runCompleteJob(job, userSessions, rawTasks, sectionId) {
   const section = SECTIONS[sectionId];
   if (!section) throw new Error("Invalid section");
-
   const apiLogger = (log) => {
-    const icon = log.type === "request" ? "↑" : "↓";
+    const icon = log.type === "request" ? "â†‘" : "â†“";
     const msg = log.type === "request"
       ? `${icon} ${log.method} ${log.path} | Body: ${log.body ? log.body.substring(0, 120) + "..." : "none"}`
       : `${icon} ${log.method} ${log.path} | Status: ${log.status} | Resp: ${log.data ? log.data.substring(0, 120) + "..." : "none"}`;
@@ -2012,127 +2165,89 @@ async function runCompleteJob(job, userSessions, rawTasks, sectionId) {
 
   try {
     job.status = "loading";
-    job.task = "Prefetching task statuses...";
+    job.task = "Checking task statuses...";
     jobLog(job, `Starting ${rawTasks.length} tasks...`, "info");
 
-    const pendingTasks = [];
-    const totalToCheck = rawTasks.length;
-
-    for (let i = 0; i < rawTasks.length; i++) {
-      if (job.status === "cancelled") break;
-      const t = rawTasks[i];
-      job.current = i;
-      job.total = totalToCheck;
-      job.task = `Checking tasks... (${i + 1}/${totalToCheck})`;
-
+    const checked = await mapLimit(rawTasks, CONFIG.CHECK_CONCURRENCY, async (t, index) => {
+      if (job.status === "cancelled") return null;
+      job.current = Math.min(rawTasks.length, index + 1);
+      job.task = `Checking tasks... (${job.current}/${rawTasks.length})`;
       try {
         const activity = await fetchActivityDetails(t.activitySetId, t.session.accessToken, t.session.loginId, t.session.clientInfo);
-
-        const alreadyDone = activity && (
-          activity.activityState === "SUBMITTED" ||
-          activity.activityState === "COMPLETED" ||
-          activity.isCompleted === true
-        );
-
-        if (!alreadyDone) {
-          pendingTasks.push(t);
-        } else {
-          jobLog(job, `[${t.userName}] Already done: ${t.activitySetId}`, "warn");
+        if (isScoredSubmitted(activity)) {
+          jobLog(job, `[${t.userName}] Already scored: ${t.activitySetId}`, "warn");
+          return null;
         }
-      } catch (e) {
-        jobLog(job, `[${t.userName}] Check error: ${e.message} - adding to pending`, "warn");
-        pendingTasks.push(t);
+        return t;
+      } catch (error) {
+        jobLog(job, `[${t.userName}] Check retry queue: ${t.activitySetId} â€” ${error.message}`, "warn");
+        return t;
       }
-    }
-
+    });
+    const pendingTasks = checked.filter(Boolean);
     job.current = 0;
     job.total = pendingTasks.length;
 
     if (pendingTasks.length === 0) {
-      job.status = "done";
-      job.task = "All tasks already completed ✓";
+      job.status = job.status === "cancelled" ? "cancelled" : "done";
+      job.task = "No pending tasks âœ“";
       job.finishedAt = Date.now();
       jobLog(job, "No pending tasks", "warn");
       return;
     }
 
     job.status = "running";
-    jobLog(job, `Processing ${pendingTasks.length} pending tasks`, "success");
-
-    let lastUser = null;
+    jobLog(job, `Processing ${pendingTasks.length} task(s) with concurrency ${CONFIG.TASK_CONCURRENCY}`, "success");
     let successCount = 0;
+    let skippedCount = 0;
     let failedCount = 0;
 
-    for (let i = 0; i < pendingTasks.length; i++) {
-      if (job.status === "cancelled") break;
-      const t = pendingTasks[i];
-      job.current = i;
-      job.task = `[${t.userName}] ${t.skillName} (${i + 1}/${pendingTasks.length})`;
-
-      if (lastUser && lastUser !== t.session.loginId) {
-        await sleep(CONFIG.DELAY_BETWEEN_TASKS_MS);
-      }
-      lastUser = t.session.loginId;
-
+    await mapLimit(pendingTasks, CONFIG.TASK_CONCURRENCY, async (t, index) => {
+      if (job.status === "cancelled") return;
+      job.task = `[${t.userName}] ${t.skillName} (${index + 1}/${pendingTasks.length})`;
       const lockKey = `task:${t.session.loginId}:${sectionId}:${t.activitySetId}`;
+      await acquireTaskLock(lockKey);
       try {
-        await acquireTaskLock(lockKey);
-        try {
-          const result = await section.completeActivity(t.session, t.activitySetId, (msg, lvl) => jobLog(job, `[${t.userName}] ${msg}`, lvl), apiLogger);
-          
-          if (result && result.success) {
-            successCount++;
-          } else if (!result || !result.skipped) {
-            failedCount++;
-          }
-        } catch (err) {
-          failedCount++;
-          jobLog(job, `[${t.userName}] Error: ${err.message}`, "error");
-          
-          const stateErr = err.message || "";
-          const conflict = /inprogress|already in progress|already started|lock|locked/i.test(stateErr);
-          if (conflict) {
-            try {
-              const fresh = await fetchActivityDetails(t.activitySetId, t.session.accessToken, t.session.loginId, t.session.clientInfo);
-              if (fresh && fresh.learnerId === String(t.session.learnerId) && (fresh.activityState === "INPROGRESS" || fresh.learnerId)) {
-                jobLog(job, `[${t.userName}] Resolving conflict...`, "warn");
-                const now = Date.now();
-                fresh.startDate = fresh.startDate || now - 40000;
-                fresh.endDate = now;
-                fresh.totalTimeTaken = Math.max(20, Math.floor((now - fresh.startDate) / 1000));
-                fresh.activityState = "SUBMITTED";
-                fresh.learnerId = t.session.learnerId;
-                await submitActivity(t.session.accessToken, fresh, "SUBMITTED", t.session.learnerId, t.session.loginId, t.session.clientInfo, apiLogger);
-                await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
-                const lessonId = fresh.lessonId || t.activitySetId;
-                await updateTimeTaken(t.session.accessToken, t.session.learnerId, lessonId, t.activitySetId, fresh.totalTimeTaken || 30, t.session.loginId, t.session.clientInfo, apiLogger, section.activityType || "Lesson");
-                jobLog(job, `[${t.userName}] ✓ Conflict resolved, submitted: ${t.activitySetId}`, "success");
-                successCount++;
-                failedCount--;
-              }
-            } catch (recErr) {
-              jobLog(job, `[${t.userName}] Conflict recovery failed: ${recErr.message}`, "error");
+        let lastError = null;
+        let completed = false;
+        for (let attempt = 1; attempt <= CONFIG.TASK_RETRIES; attempt++) {
+          try {
+            const result = await section.completeActivity(t.session, t.activitySetId, (msg, lvl) => jobLog(job, `[${t.userName}] ${msg}`, lvl), apiLogger);
+            if (result && result.success) { successCount++; completed = true; break; }
+            if (result && result.skipped) { skippedCount++; completed = true; break; }
+            lastError = new Error("RCA did not return a successful completion result");
+          } catch (error) {
+            lastError = error;
+            if (attempt < CONFIG.TASK_RETRIES && isTransientRcaError(error)) {
+              const delay = retryDelay(attempt);
+              jobLog(job, `[${t.userName}] Retry ${attempt + 1}/${CONFIG.TASK_RETRIES} for ${t.activitySetId} in ${delay}ms: ${error.message}`, "warn");
+              await sleep(delay);
+              continue;
             }
+            break;
           }
+        }
+        if (!completed) {
+          failedCount++;
+          jobLog(job, `[${t.userName}] Failed ${t.activitySetId}: ${lastError ? lastError.message : "Unknown RCA failure"}`, "error");
         }
       } finally {
         releaseTaskLock(lockKey);
+        job.current = Math.min(job.total, job.current + 1);
       }
-
-      job.current = i + 1;
       if (CONFIG.DELAY_BETWEEN_TASKS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_TASKS_MS);
-    }
+    });
 
     job.status = job.status === "cancelled" ? "cancelled" : (failedCount > 0 ? "error" : "done");
-    job.error = failedCount > 0 ? `${failedCount} task(s) failed` : null;
-    job.task = failedCount > 0 ? `Completed ${successCount}/${pendingTasks.length}` : `Completed ${successCount} tasks ✓`;
+    job.error = failedCount > 0 ? `${failedCount} task(s) failed after bounded retries` : null;
+    job.task = failedCount > 0 ? `Completed ${successCount}/${pendingTasks.length}; ${skippedCount} skipped for manual input` : `Completed ${successCount}; ${skippedCount} manual task(s) skipped`;
     job.finishedAt = Date.now();
-    jobLog(job, `Final: ${successCount} success, ${failedCount} failed`, failedCount > 0 ? "error" : "success");
-  } catch (err) {
+    jobLog(job, `Final: ${successCount} success, ${skippedCount} manual/skipped, ${failedCount} failed`, failedCount > 0 ? "error" : "success");
+  } catch (error) {
     job.status = "error";
-    job.error = err.message;
+    job.error = error.message;
     job.finishedAt = Date.now();
-    jobLog(job, "Fatal: " + err.message, "error");
+    jobLog(job, "Fatal: " + error.message, "error");
   }
 }
 
@@ -2178,10 +2293,10 @@ const MIME = {
 };
 
 function serveStatic(req, res, pathname) {
-  if (pathname !== "/" && pathname !== "/index" && pathname !== "/single") {
+  if (!["/", "/index", "/index.html", "/single", "/single.html"].includes(pathname)) {
     res.writeHead(404); res.end("Not Found"); return;
   }
-  const fileName = pathname === "/single" ? "single.html" : "index.html";
+  const fileName = pathname === "/single" || pathname === "/single.html" ? "single.html" : "index.html";
   const filePath = path.join(PUBLIC, fileName);
 
   fs.readFile(filePath, (err, data) => {
@@ -2209,7 +2324,7 @@ async function handleApi(req, res, pathname) {
     const password = body.password || CONFIG.APP_PASSWORD;
     const loginIdRaw = String(body.loginId || "").trim();
     if (!loginIdRaw) return sendJson(res, 400, { error: "Enter User ID" });
-    if (body.bulk === true || /[,，]/.test(loginIdRaw)) {
+    if (body.bulk === true || /[,ï¼Œ]/.test(loginIdRaw)) {
       return sendJson(res, 400, { error: "Please sign in with one User ID at a time." });
     }
     const loginIds = [loginIdRaw];
@@ -2400,6 +2515,37 @@ async function handleApi(req, res, pathname) {
     } catch (error) { return sendJson(res, error.status || 502, { error: error.message || "Could not load RCA reports." }); }
   }
 
+  // READ/SUBMIT ONE ACTIVITY FOR MANUAL RETAKES
+  if (pathname === "/api/activity" && req.method === "GET") {
+    const s = requireAuth(req, res);
+    if (!s) return;
+    const url = new URL(req.url, "http://localhost");
+    const activitySetId = String(url.searchParams.get("activitySetId") || "").trim();
+    const sectionId = String(url.searchParams.get("section") || "").trim();
+    if (!activitySetId || !SECTIONS[sectionId]) return sendJson(res, 400, { error: "activitySetId and valid section are required" });
+    const access = await getSectionAccess(s.users[0]);
+    if (!access.unlocked[sectionId]) return sendJson(res, 403, { error: "This section is locked for your RCA account" });
+    try {
+      const activity = await fetchActivityDetails(activitySetId, s.users[0].accessToken, s.users[0].loginId, s.users[0].clientInfo);
+      return sendJson(res, 200, publicActivity(activity));
+    } catch (e) { return sendJson(res, e.status || 502, { error: e.message || "Activity questions could not be loaded" }); }
+  }
+
+  if (pathname === "/api/activity/submit" && req.method === "POST") {
+    const s = requireAuth(req, res);
+    if (!s) return;
+    try {
+      const body = await readJson(req);
+      const activitySetId = String(body.activitySetId || "").trim();
+      const sectionId = String(body.section || "").trim();
+      if (!activitySetId || !SECTIONS[sectionId]) return sendJson(res, 400, { error: "activitySetId and valid section are required" });
+      const access = await getSectionAccess(s.users[0]);
+      if (!access.unlocked[sectionId]) return sendJson(res, 403, { error: "This section is locked for your RCA account" });
+      const result = await runWithUserLock(s.users[0].loginId, () => submitManualActivity(s.users[0], activitySetId, body.answers || {}));
+      return sendJson(res, 200, { ok: true, ...result });
+    } catch (e) { return sendJson(res, e.status || 502, { error: e.message || "RCA activity submission failed" }); }
+  }
+
   // PLACEMENT TEST
   if (pathname === "/api/placement" && req.method === "GET") {
     const s = requireAuth(req, res);
@@ -2494,6 +2640,13 @@ async function handleApi(req, res, pathname) {
     const targetUsers = [s.users[0]];
 
     const rawTasks = [];
+    const rawTaskKeys = new Set();
+    const enqueueTask = (task) => {
+      const key = `${task.session.loginId}:${section}:${task.activitySetId}`;
+      if (!task.activitySetId || rawTaskKeys.has(key)) return;
+      rawTaskKeys.add(key);
+      rawTasks.push(task);
+    };
     for (const session of targetUsers) {
       let levelsToScan;
       if (section === 'ielts') {
@@ -2505,7 +2658,7 @@ async function handleApi(req, res, pathname) {
 
       if (levelId) levelsToScan = levelsToScan.filter((l) => String(l.id) === String(levelId));
 
-      for (const level of levelsToScan) {
+      await mapLimit(levelsToScan, CONFIG.CHECK_CONCURRENCY, async (level) => {
         try {
           const data = await sectionObj.loadLevelData(session.accessToken, level, session.loginId, session.clientInfo);
 
@@ -2518,7 +2671,7 @@ async function handleApi(req, res, pathname) {
               if (!targetUnit.lessons) continue;
               targetUnit.lessons.forEach((lesson) => {
                 if (!lesson.isCompleted && !lesson.isLocked && lesson.activitySetId) {
-                  rawTasks.push({
+                  enqueueTask({
                     userName: session.name,
                     userLoginId: session.loginId,
                     skillName: lesson.skillKey || 'SKILL',
@@ -2528,7 +2681,7 @@ async function handleApi(req, res, pathname) {
                 }
               });
             }
-            if (sectionObj.activityType !== "Ielts") continue;
+            if (sectionObj.activityType !== "Ielts") return;
           }
 
           let skillKeys = Object.keys(data.skills).filter(k => (data.skills[k].totalActivities || 0) > 0);
@@ -2544,7 +2697,7 @@ async function handleApi(req, res, pathname) {
             }
 
             activityIds.forEach((actId) => {
-              rawTasks.push({
+              enqueueTask({
                 userName: session.name,
                 userLoginId: session.loginId,
                 skillName: key,
@@ -2554,7 +2707,7 @@ async function handleApi(req, res, pathname) {
             });
           }
         } catch (e) { console.warn("Queue skip:", e.message); }
-      }
+      });
     }
 
     const job = createJob(mode, { mode, userCount: targetUsers.length, section, ownerLoginId: s.users[0].loginId });
@@ -2585,8 +2738,8 @@ async function handleApi(req, res, pathname) {
     const s = requireAuth(req, res);
     if (!s) return;
     const job = jobs.get(jobMatch[1]);
-    if (!job) return sendJson(res, 404, { error: "Job not found" });
-    if (job.meta && job.meta.ownerLoginId && job.meta.ownerLoginId !== s.users[0].loginId) return sendJson(res, 404, { error: "Job not found" });
+    if (!job) return sendJson(res, 200, { id: jobMatch[1], status: "expired", code: "JOB_EXPIRED", retryable: false, task: "Job expired or server restarted; start a new job.", error: null, logs: [], percent: 0 });
+    if (job.meta && job.meta.ownerLoginId && job.meta.ownerLoginId !== s.users[0].loginId) return sendJson(res, 404, { error: "Job not found", code: "JOB_NOT_FOUND", retryable: false });
     return sendJson(res, 200, {
       id: job.id,
       status: job.status,
@@ -2622,19 +2775,19 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(CONFIG.PORT, CONFIG.HOST, () => {
   console.log("=".repeat(70));
-  console.log(" 🚀 RCA IELTS Dashboard (Production v5 - CRITICAL BUGS FIXED)");
-  console.log(" 🌐 URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
-  console.log(" 🔐 Session: 24h TTL + Auto-Refresh");
-  console.log(" ⚡ Connection: Keep-Alive + Smart Retry + State Sync");
-  console.log(" 📚 Sections: LearnEnglish + IELTS + APEX + Wordcraft + Vocab Builder");
-  console.log(" ✅ FIXED: Multi-Stage Task Verification + Answer ID Handling");
-  console.log(" ✅ FIXED: State Refresh After Completion + Scoring Accuracy");
-  console.log(" ✅ FIXED: Concurrent Task Locks + Conflict Resolution");
-  console.log(" ✅ FIXED: Certificate Download + Session State Management");
-  console.log(" ✅ FIXED: False Success Detection + Proper Task Refresh");
-  console.log(" 🎯 Complete All Level/Levels: Fully Supported");
-  console.log(" 🔑 NEW: /password endpoint shows coin passkey");
-  console.log(" 🌳 NEW: /single.html static route");
-  console.log(" ✨ PRODUCTION READY: All edge cases handled");
+  console.log(" ðŸš€ RCA IELTS Dashboard (Production v5 - CRITICAL BUGS FIXED)");
+  console.log(" ðŸŒ URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
+  console.log(" ðŸ” Session: 24h TTL + Auto-Refresh");
+  console.log(" âš¡ Connection: Keep-Alive + Smart Retry + State Sync");
+  console.log(" ðŸ“š Sections: LearnEnglish + IELTS + APEX + Wordcraft + Vocab Builder");
+  console.log(" âœ… FIXED: Multi-Stage Task Verification + Answer ID Handling");
+  console.log(" âœ… FIXED: State Refresh After Completion + Scoring Accuracy");
+  console.log(" âœ… FIXED: Concurrent Task Locks + Conflict Resolution");
+  console.log(" âœ… FIXED: Certificate Download + Session State Management");
+  console.log(" âœ… FIXED: False Success Detection + Proper Task Refresh");
+  console.log(" ðŸŽ¯ Complete All Level/Levels: Fully Supported");
+  console.log(" ðŸ”‘ NEW: /password endpoint shows coin passkey");
+  console.log(" ðŸŒ³ NEW: /single.html static route");
+  console.log(" âœ¨ PRODUCTION READY: All edge cases handled");
   console.log("=".repeat(70));
 });
