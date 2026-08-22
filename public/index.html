@@ -356,7 +356,6 @@
     <div class="nav-links">
       <a href="/">Home</a>
       <a href="/single.html">Single Mode</a>
-      <a href="#">Bulk Mode (stopped)</a>
       <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Theme">
         <i class="fas fa-moon" id="themeIcon"></i>
       </button>
@@ -366,8 +365,7 @@
 
   <div class="mobile-menu" id="mobileMenu">
     <a href="/">Home</a>
-    <a href="/single">Single Mode</a>
-    <a href="/bulk">Bulk Mode</a>
+    <a href="/single.html">Single Mode</a>
     <button class="theme-toggle" onclick="toggleTheme()" style="width:100%;justify-content:center;">
       <i class="fas fa-moon" id="themeIconMobile"></i> Toggle Theme
     </button>
@@ -375,10 +373,9 @@
 
   <section class="hero">
     <h1>IELTS Automation Dashboard</h1>
-    <p>Complete your IELTS modules instantly with zero delay. Choose Single mode for personal use or Bulk mode for managing up to 5 accounts at once.</p>
+    <p>Complete your IELTS modules instantly with zero delay. Choose Single mode for personal use with verified RCA progress.</p>
     <div class="hero-btns">
-      <a href="/single" class="btn btn-primary"><i class="fas fa-user"></i> Single Mode</a>
-      <a href="/bulk" class="btn btn-secondary"><i class="fas fa-users"></i> Bulk Mode</a>
+      <a href="single.html" class="btn btn-primary"><i class="fas fa-user"></i> Single Mode</a>
     </div>
   </section>
 
@@ -393,8 +390,7 @@
         </div>
         <p>
           Click <strong>Single Mode</strong> if you want to manage just your own account. 
-          Click <strong>Bulk Mode</strong> if you need to run tasks on up to 5 accounts together. 
-          Bulk mode shows all users side-by-side in one dashboard.
+The dashboard loads only the sections unlocked for your RCA account.
         </p>
       </div>
       <div class="step-card">
@@ -404,8 +400,7 @@
         </div>
         <p>
           Enter your <strong>User ID</strong> and <strong>Password</strong>, then hit Login. 
-          In Bulk Mode, type up to 5 IDs separated by commas (e.g. <em>12345, 67890, 11111</em>). 
-          The system will authenticate all accounts and load their levels.
+Use one registered User ID and your password. The system will authenticate your account and load its levels.
         </p>
       </div>
       <div class="step-card">
@@ -449,22 +444,22 @@
           <li><i class="fas fa-check-circle"></i> Add up to 500 Coins per request</li>
           <li><i class="fas fa-check-circle"></i> Zero delay execution</li>
         </ul>
-        <a href="/single" class="btn btn-primary" style="width:100%;justify-content:center;"><i class="fas fa-arrow-right"></i> Open Single Mode</a>
+        <a href="single.html" class="btn btn-primary" style="width:100%;justify-content:center;"><i class="fas fa-arrow-right"></i> Open Single Mode</a>
       </div>
 
       <div class="mode-card">
-        <div class="mode-icon" style="background:rgba(236,72,153,0.15);color:var(--secondary);"><i class="fas fa-users"></i></div>
-        <span class="badge" style="background:rgba(236,72,153,0.15);color:var(--secondary);">For Power Users</span>
-        <h3>Bulk Batch Mode</h3>
-        <p style="color:var(--text-secondary);font-size:14px;line-height:1.6;">Manage up to 5 accounts simultaneously from one dashboard.</p>
+        <div class="mode-icon" style="background:rgba(236,72,153,0.15);color:var(--secondary);"><i class="fas fa-layer-group"></i></div>
+        <span class="badge" style="background:rgba(236,72,153,0.15);color:var(--secondary);">Account Access</span>
+        <h3>Unlocked Sections</h3>
+        <p style="color:var(--text-secondary);font-size:14px;line-height:1.6;">Open only the learning packages available for your RCA account.</p>
         <ul>
-          <li><i class="fas fa-check-circle"></i> Login with up to 5 User IDs</li>
-          <li><i class="fas fa-check-circle"></i> Side-by-side user comparison</li>
-          <li><i class="fas fa-check-circle"></i> Run All tasks for any user</li>
-          <li><i class="fas fa-check-circle"></i> Bulk coin add to all accounts</li>
-          <li><i class="fas fa-check-circle"></i> No task execution delays</li>
+          <li><i class="fas fa-check-circle"></i> Package-aware section access</li>
+          <li><i class="fas fa-check-circle"></i> Locked lessons stay hidden</li>
+          <li><i class="fas fa-check-circle"></i> Verified task completion</li>
+          <li><i class="fas fa-check-circle"></i> Reports and certificate support</li>
+          <li><i class="fas fa-check-circle"></i> Placement-test prompt when available</li>
         </ul>
-        <a href="/bulk" class="btn btn-primary" style="width:100%;justify-content:center;background:linear-gradient(135deg,var(--secondary),#db2777);"><i class="fas fa-arrow-right"></i> Open Bulk Mode</a>
+        <a href="/" class="btn btn-primary" style="width:100%;justify-content:center;background:linear-gradient(135deg,var(--secondary),#db2777);"><i class="fas fa-arrow-right"></i> Open Dashboard</a>
       </div>
     </div>
   </section>
