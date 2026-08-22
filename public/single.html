@@ -160,6 +160,18 @@
     .coin-modal-content .error-msg { margin-top: 15px; }
     .coin-modal-content .btn { margin-top: 10px; }
 
+    .activity-modal { position:fixed; inset:0; background:rgba(0,0,0,.72); display:none; align-items:center; justify-content:center; z-index:3001; padding:18px; }
+    .activity-modal.active { display:flex; }
+    .activity-modal-card { background:var(--card); border:1px solid var(--border); border-radius:20px; padding:24px; width:min(820px,100%); max-height:90vh; overflow:auto; box-shadow:var(--shadow); }
+    .activity-question { padding:16px; border:1px solid var(--border); border-radius:12px; margin-top:12px; background:rgba(255,255,255,.025); }
+    .activity-question-title { font-weight:700; line-height:1.5; margin-bottom:8px; }
+    .activity-question-instruction { color:var(--text-secondary); font-size:12px; margin-bottom:10px; }
+    .activity-option { display:flex; gap:9px; align-items:flex-start; padding:8px; border-radius:8px; cursor:pointer; }
+    .activity-option:hover { background:rgba(99,102,241,.12); }
+    .activity-option input { margin-top:3px; }
+    .activity-answer-input { width:100%; min-height:42px; resize:vertical; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); padding:10px; }
+    .retake-btn { margin-left:8px; padding:4px 8px; font-size:11px; border:1px solid var(--warning); color:var(--warning); background:transparent; border-radius:6px; cursor:pointer; }
+
     /* LIVE API CONSOLE */
     .live-console {
       position: fixed;
@@ -498,6 +510,14 @@
     </div>
   </div>
 
+  <div id="activityModal" class="activity-modal">
+    <div class="activity-modal-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;"><div><h2 id="activityModalTitle" style="margin:0;font-size:20px;">Retake Activity</h2><p id="activityModalSub" style="margin:5px 0 0;color:var(--text-secondary);font-size:12px;"></p></div><button class="btn btn-secondary btn-sm" onclick="closeActivityModal()">Close</button></div>
+      <div id="activityQuestions" style="margin-top:14px;"></div>
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;"><button class="btn btn-primary" id="submitActivityBtn" onclick="submitManualActivity()"><i class="fas fa-paper-plane"></i> Submit Answers</button></div>
+    </div>
+  </div>
+
   <!-- LIVE API CONSOLE -->
   <div id="liveConsole" class="live-console">
     <div class="live-console-header">
@@ -523,6 +543,8 @@
     let coinStep = 1;
     let savedPasskey = "";
     let currentLevelsData = [];
+    let activeActivity = null;
+    let activeActivitySection = null;
 
     // ==================== LIVE API CONSOLE ====================
     const originalFetch = window.fetch;
@@ -848,25 +870,65 @@
         const banner = document.getElementById("placementBanner");
         const button = document.getElementById("placementBtn");
         if (placementStatus && placementStatus.available && !placementStatus.completed) {
-          document.getElementById("placementBannerSub").textContent = `${placementStatus.activity?.totalQuestions || "The"} questions are available. RCA will verify the submitted result.`;
+          document.getElementById("placementBannerSub").textContent = placementStatus.retake ? `${placementStatus.activity?.totalQuestions || "The"} questions are available again. Retake to earn a valid RCA score.` : `${placementStatus.activity?.totalQuestions || "The"} questions are available. RCA will verify the submitted result.`;
           banner.style.display = "flex";
-          button.onclick = completePlacementTest;
+          button.onclick = () => openActivityRetake(placementStatus.activitySetId, "Placement Test", true);
         } else banner.style.display = "none";
       } catch (_) { document.getElementById("placementBanner").style.display = "none"; }
     }
 
-    async function completePlacementTest() {
-      if (!confirm("Submit the available placement test with the correct answers?")) return;
-      const button = document.getElementById("placementBtn");
-      button.disabled = true;
-      button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting';
+
+    async function openActivityRetake(activitySetId, title, isPlacement) {
       try {
-        const data = await api("/api/placement/complete", { method: "POST", body: {} });
-        toast("Placement test verified", `Score: ${data.result?.score ?? data.result?.totalEarnedScore ?? 0}`, "success");
-        await loadPlacementStatus();
+        activeActivitySection = isPlacement ? 'learnenglish' : currentSection;
+        const data = await api(`/api/activity?activitySetId=${encodeURIComponent(activitySetId)}&section=${encodeURIComponent(activeActivitySection)}`);
+        activeActivity = data;
+        document.getElementById('activityModalTitle').textContent = title || data.activityName || 'Retake Activity';
+        document.getElementById('activityModalSub').textContent = `${data.totalQuestions || (data.questions || []).length} questions · Answer them and submit to RCA for a fresh score.`;
+        const box = document.getElementById('activityQuestions');
+        box.innerHTML = (data.questions || []).map((q, index) => {
+          const options = Array.isArray(q.options) ? q.options : [];
+          const qText = escapeHtml(q.question || `Question ${index + 1}`);
+          const instruction = escapeHtml(q.instruction || '');
+          const multi = /MULTI|CHECKBOX/i.test(String(q.itemType || ''));
+          const controls = options.length ? options.map((o) => `<label class="activity-option"><input type="${multi ? 'checkbox' : 'radio'}" name="activity-q-${index}" value="${escapeHtml(String(o.id))}"><span>${escapeHtml(o.text || '')}</span></label>`).join('') : `<textarea class="activity-answer-input" data-answer-input="${index}" placeholder="Type your answer"></textarea>`;
+          return `<div class="activity-question" data-question-index="${index}" data-item-id="${escapeHtml(String(q.itemId ?? ''))}" data-result-id="${escapeHtml(String(q.activityResultDetailId ?? ''))}"><div class="activity-question-title">${index + 1}. ${qText}</div><div class="activity-question-instruction">${instruction}</div>${controls}</div>`;
+        }).join('');
+        document.getElementById('activityModal').classList.add('active');
+      } catch (e) { toast('Activity', e.message || 'Questions could not be loaded', 'error'); }
+    }
+
+    function closeActivityModal() {
+      document.getElementById('activityModal').classList.remove('active');
+      activeActivity = null;
+    }
+
+    async function submitManualActivity() {
+      if (!activeActivity) return;
+      const answers = {};
+      document.querySelectorAll('#activityQuestions .activity-question').forEach((card) => {
+        const key = card.dataset.resultId || card.dataset.itemId;
+        const checked = Array.from(card.querySelectorAll('input:checked')).map((input) => input.value);
+        const input = card.querySelector('[data-answer-input]');
+        const value = input ? input.value.trim() : (checked.length > 1 ? checked : checked[0] || '');
+        if (key) answers[key] = value;
+      });
+      const button = document.getElementById('submitActivityBtn');
+      button.disabled = true; button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting';
+      try {
+        const data = await api('/api/activity/submit', { method:'POST', body:{ activitySetId: activeActivity.activitySetId, section: activeActivitySection, answers } });
+        if (data.retakeRequired) toast('Submitted but score is still 0', 'RCA saved the attempt. Retake again with different answers for a positive score.', 'error');
+        else toast('Score updated', `RCA verified ${data.activity?.totalAnswersCorrect ?? 0} correct · score ${data.activity?.totalEarnedScore ?? 0}`, 'success');
+        closeActivityModal();
         await loadLevels();
-      } catch (e) { toast("Placement test", e.message, "error"); }
-      finally { button.disabled = false; button.innerHTML = '<i class="fas fa-play"></i> Start Test'; }
+        await loadPlacementStatus();
+      } catch (e) { toast('Submit', e.message || 'RCA rejected the answers', 'error'); }
+      finally { button.disabled = false; button.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Answers'; }
+    }
+
+    async function completePlacementTest() {
+      if (placementStatus && placementStatus.activitySetId) return openActivityRetake(placementStatus.activitySetId, "Placement Test", true);
+      toast("Placement test", "RCA has not provided an available test yet.", "error");
     }
 
     // SWITCH SECTION
@@ -953,7 +1015,8 @@
                           <div class="lesson-icon">${lesson.isCompleted ? '✓' : (lesson.isLocked ? '🔒' : '◯')}</div>
                           <div class="lesson-name">${lesson.lessonName || 'Lesson'}</div>
                           <div class="lesson-skill">${lesson.skillKey || 'SKILL'}</div>
-                          <div class="lesson-status">${lesson.isLocked ? 'LOCKED' : (lesson.status || 'NEW')}</div>
+                          ${(lesson.isCompleted || lesson.needsScoreRetake) && lesson.activitySetId ? `<button class="retake-btn" onclick="openActivityRetake('${String(lesson.activitySetId).replace(/'/g, "\'")}', '${String(lesson.lessonName || 'Lesson').replace(/'/g, "\'")}', false)">${lesson.needsScoreRetake ? 'Retake Score' : 'Retake'}</button>` : ''}
+                          <div class="lesson-status">${lesson.isLocked ? 'LOCKED' : (lesson.needsScoreRetake ? 'SCORE 0 · RETAKE' : (lesson.status || 'NEW'))}</div>
                         </div>
                       `;
                     });
