@@ -1392,7 +1392,7 @@ const SECTIONS = {
         const state = isLast ? "SUBMITTED" : "INPROGRESS";
         onLog && onLog(`Q${i+1}/${allQuestions.length}: ${isSpeakingQuestion(q) ? "SPEAKING (auto)" : isWritingQuestion(q) ? "WRITING (auto)" : "ANSWERED"} -> ${state}`, "info");
 
-        await submitPerQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
+        await submitSingleQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
 
         if (!isLast && CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
       }
@@ -1472,7 +1472,7 @@ const SECTIONS = {
         activity.totalQuestionsAttempted = attemptedCount; activity.totalAnswersCorrect = correctCount; activity.totalEarnedScore = earnedScore; activity.totalQuestionsLeft = Math.max(0, allQuestions.length - attemptedCount); activity.activityState = "INPROGRESS"; activity.learnerId = learnerId; if (!activity.startDate) activity.startDate = activityStartTime - 15000;
         const isLast = i === allQuestions.length - 1; const state = isLast ? "SUBMITTED" : "INPROGRESS";
         onLog && onLog(`Q${i+1}/${allQuestions.length}: ${isSpeakingQuestion(q) ? "SPEAKING (auto)" : isWritingQuestion(q) ? "WRITING (auto)" : "ANSWERED"} -> ${state}`, "info");
-        await submitPerQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
+        await submitSingleQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
         if (!isLast && CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
       }
       await sleep(CONFIG.FINAL_VERIFICATION_DELAY_MS);
@@ -1541,7 +1541,7 @@ const SECTIONS = {
         activity.totalQuestionsAttempted = attemptedCount; activity.totalAnswersCorrect = correctCount; activity.totalEarnedScore = earnedScore; activity.totalQuestionsLeft = Math.max(0, allQuestions.length - attemptedCount); activity.activityState = "INPROGRESS"; activity.learnerId = learnerId; if (!activity.startDate) activity.startDate = activityStartTime - 15000;
         const isLast = i === allQuestions.length - 1; const state = isLast ? "SUBMITTED" : "INPROGRESS";
         onLog && onLog(`Q${i+1}/${allQuestions.length}: ${isSpeakingQuestion(q) ? "SPEAKING (auto)" : isWritingQuestion(q) ? "WRITING (auto)" : "ANSWERED"} -> ${state}`, "info");
-        await submitPerQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
+        await submitSingleQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
         if (!isLast && CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
       }
       await sleep(CONFIG.FINAL_VERIFICATION_DELAY_MS);
@@ -1610,7 +1610,7 @@ const SECTIONS = {
         activity.totalQuestionsAttempted = attemptedCount; activity.totalAnswersCorrect = correctCount; activity.totalEarnedScore = earnedScore; activity.totalQuestionsLeft = Math.max(0, allQuestions.length - attemptedCount); activity.activityState = "INPROGRESS"; activity.learnerId = learnerId; if (!activity.startDate) activity.startDate = activityStartTime - 15000;
         const isLast = i === allQuestions.length - 1; const state = isLast ? "SUBMITTED" : "INPROGRESS";
         onLog && onLog(`Q${i+1}/${allQuestions.length}: ${isSpeakingQuestion(q) ? "SPEAKING (auto)" : isWritingQuestion(q) ? "WRITING (auto)" : "ANSWERED"} -> ${state}`, "info");
-        await submitPerQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
+        await submitSingleQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
         if (!isLast && CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
       }
       await sleep(CONFIG.FINAL_VERIFICATION_DELAY_MS);
@@ -1663,7 +1663,7 @@ const SECTIONS = {
         activity.totalQuestionsAttempted = attemptedCount; activity.totalAnswersCorrect = correctCount; activity.totalEarnedScore = earnedScore; activity.totalQuestionsLeft = Math.max(0, allQuestions.length - attemptedCount); activity.activityState = "INPROGRESS"; activity.learnerId = learnerId; if (!activity.startDate) activity.startDate = activityStartTime - 15000;
         const isLast = i === allQuestions.length - 1; const state = isLast ? "SUBMITTED" : "INPROGRESS";
         onLog && onLog(`Q${i+1}/${allQuestions.length}: ${isSpeakingQuestion(q) ? "SPEAKING (auto)" : isWritingQuestion(q) ? "WRITING (auto)" : "ANSWERED"} -> ${state}`, "info");
-        await submitPerQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
+        await submitSingleQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
         if (!isLast && CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
       }
       await sleep(CONFIG.FINAL_VERIFICATION_DELAY_MS);
@@ -1944,3 +1944,4 @@ server.listen(CONFIG.PORT, CONFIG.HOST, () => {
   console.log(" NEW: Speed optimized - reduced delays, higher concurrency");
   console.log("=".repeat(70));
 });
+
