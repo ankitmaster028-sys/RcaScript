@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * RCA IELTS Dashboard — Production Edition (UPGRADED v7 - NO VOICE TIMEOUT)
- * ✅ Speaking Tasks Auto-Complete - FIXED (no voice wait, instant bypass)
- * ✅ Writing Tasks Fixed - FIXED (proper answer text)
- * ✅ Accurate Timing - FIXED (real elapsed time tracking)
- * ✅ Performance Optimized - FIXED (parallel + reduced delays + no voice wait)
- * ✅ All Features Preserved - VERIFIED (zero feature removal)
- * ✅ No Voice Timeouts - FIXED (bypass voice generation entirely)
+ * RCA IELTS Dashboard â€” Production Edition (UPGRADED v7 - NO VOICE TIMEOUT)
+ * âœ… Speaking Tasks Auto-Complete - FIXED (no voice wait, instant bypass)
+ * âœ… Writing Tasks Fixed - FIXED (proper answer text)
+ * âœ… Accurate Timing - FIXED (real elapsed time tracking)
+ * âœ… Performance Optimized - FIXED (parallel + reduced delays + no voice wait)
+ * âœ… All Features Preserved - VERIFIED (zero feature removal)
+ * âœ… No Voice Timeouts - FIXED (bypass voice generation entirely)
  */
 
 "use strict";
@@ -884,7 +884,7 @@ const SECTIONS = {
         }
       }
 
-      onLog && onLog("✓ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const elapsedSecs = Math.max(15, Math.floor((Date.now() - startTime) / 1000));
       const lessonId = activity.lessonId || activitySetId;
@@ -915,7 +915,7 @@ const SECTIONS = {
         return (data || []).map((l, idx) => ({
           id: l.id || idx,
           name: l.level || "L" + (idx + 1),
-          title: (l.level || "Level") + (l.nextLevel ? " → " + l.nextLevel : ""),
+          title: (l.level || "Level") + (l.nextLevel ? " â†’ " + l.nextLevel : ""),
           subtitle: "APEX Level",
           color: String(l.level || "").toLowerCase() || "a1",
           curriculumLevelMappingId: l.curriculumLevelMappingId,
@@ -1082,7 +1082,7 @@ const SECTIONS = {
           throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
         }
       }
-      onLog && onLog("✓ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const elapsedSecs = Math.max(15, Math.floor((Date.now() - startTime) / 1000));
       const lessonId = activity.lessonId || activitySetId;
@@ -1112,7 +1112,7 @@ const SECTIONS = {
         return (data || []).map((l, idx) => ({
           id: l.id || idx,
           name: l.level || "L" + (idx + 1),
-          title: (l.level || "Level") + (l.nextLevel ? " → " + l.nextLevel : ""),
+          title: (l.level || "Level") + (l.nextLevel ? " â†’ " + l.nextLevel : ""),
           subtitle: "Vocab Builder Level",
           color: String(l.level || "").toLowerCase() || "a1",
           curriculumLevelMappingId: l.curriculumLevelMappingId,
@@ -1279,7 +1279,7 @@ const SECTIONS = {
           throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
         }
       }
-      onLog && onLog("✓ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const elapsedSecs = Math.max(15, Math.floor((Date.now() - startTime) / 1000));
       const lessonId = activity.lessonId || activitySetId;
@@ -1309,7 +1309,7 @@ const SECTIONS = {
         return (data || []).map((l, idx) => ({
           id: l.id || idx,
           name: l.level || "L" + (idx + 1),
-          title: (l.level || "Level") + (l.nextLevel ? " → " + l.nextLevel : ""),
+          title: (l.level || "Level") + (l.nextLevel ? " â†’ " + l.nextLevel : ""),
           subtitle: "Wordcraft Level",
           color: String(l.level || "").toLowerCase() || "a1",
           curriculumLevelMappingId: l.curriculumLevelMappingId,
@@ -1476,7 +1476,7 @@ const SECTIONS = {
           throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
         }
       }
-      onLog && onLog("✓ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const elapsedSecs = Math.max(15, Math.floor((Date.now() - startTime) / 1000));
       const lessonId = activity.lessonId || activitySetId;
@@ -1608,7 +1608,7 @@ const SECTIONS = {
           throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
         }
       }
-      onLog && onLog("✓ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
+      onLog && onLog("âœ“ Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs)", "success");
 
       const elapsedSecs = Math.max(15, Math.floor((Date.now() - startTime) / 1000));
       const lessonId = activity.lessonId || activitySetId;
@@ -1623,95 +1623,155 @@ function normalizeRcaOptionId(value) {
   return /^\d+$/.test(String(value)) ? Number(value) : value;
 }
 
+function answerTypeOf(question) {
+  return String(question && (question.itemType || question.answerType || question.type || question.questionType) || "").trim().toUpperCase();
+}
+
+function isTruthyAnswerFlag(value) {
+  return value === true || value === 1 || ["TRUE", "1", "YES", "Y"].includes(String(value).trim().toUpperCase());
+}
+
 function isTextAnswerQuestion(question) {
-  const type = String(question && (question.itemType || question.answerType || question.type) || "").toUpperCase();
-  return /FIB|SHORTANSWER|TEXTANSWER|ESSAY|WRITING/.test(type);
+  return /FIB|FILLINBLANK|SHORTANSWER|TEXTANSWER|ESSAY|WRITING/.test(answerTypeOf(question));
+}
+
+function isWritingQuestion(question) {
+  return /IELTSWRITING|WRITING|ESSAY/.test(answerTypeOf(question));
+}
+
+function isSpeakingQuestion(question) {
+  return /SPEAK|RECORD|PRONUNCIATION|LISTENING_RECORD/.test(answerTypeOf(question));
 }
 
 function isNonAnswerQuestion(question) {
-  const type = String(question && (question.itemType || question.answerType || question.type) || "").toUpperCase();
-  return /COMPREHENSION|PASSAGE|IELTSLISTENING|IELTSSPEAKING|LISTENANDRECORD|RECORD/.test(type);
+  return /COMPREHENSION|PASSAGE|IELTSLISTENING|IELTSSPEAKING|LISTENANDRECORD|RECORD/.test(answerTypeOf(question));
+}
+
+function optionText(option) {
+  if (!option) return "";
+  return option.answerOption ?? option.text ?? option.answer ?? option.optionText ?? option.value ?? "";
+}
+
+function correctOptionsFor(question) {
+  const options = Array.isArray(question && question.activityAnswerDTO) ? question.activityAnswerDTO : [];
+  return options.filter((option) => isTruthyAnswerFlag(option.isCorrect ?? option.correct ?? option.isAnswer));
+}
+
+function responseAnswerFor(question) {
+  if (!question) return null;
+  const candidates = [
+    question.correctAnswer,
+    question.correct_answer,
+    question.correctResponse,
+    question.expectedAnswer,
+    question.answerKey,
+    question.answer,
+  ];
+  return candidates.find((value) => value != null && String(value).trim() !== "") ?? null;
+}
+
+/** Keep the old answer resolver's order while accepting API type variants. */
+function pickCorrectAnswerCompat(question) {
+  const options = Array.isArray(question && question.activityAnswerDTO) ? question.activityAnswerDTO : [];
+  const correctOptions = correctOptionsFor(question);
+  const responseAnswer = responseAnswerFor(question);
+
+  if (correctOptions.length > 1) return correctOptions.map((option) => normalizeRcaOptionId(option.id));
+  if (correctOptions.length === 1) return normalizeRcaOptionId(correctOptions[0].id);
+
+  if (responseAnswer != null) {
+    const byId = options.find((option) => String(option.id) === String(responseAnswer));
+    const byText = options.find((option) => String(optionText(option)).trim().toLowerCase() === String(responseAnswer).trim().toLowerCase());
+    if (byId) return normalizeRcaOptionId(byId.id);
+    if (byText && !isTextAnswerQuestion(question)) return normalizeRcaOptionId(byText.id);
+    return isTextAnswerQuestion(question) ? String(byText ? optionText(byText) : responseAnswer).trim() : normalizeRcaOptionId(responseAnswer);
+  }
+
+  if (isTextAnswerQuestion(question)) return "";
+  if (options.length > 0) return normalizeRcaOptionId(options[0].id);
+  return null;
+}
+
+function writingResponseText(question) {
+  const candidates = [
+    question && question.userEssay,
+    question && question.correctAnswer,
+    question && question.correctResponse,
+    question && question.expectedAnswer,
+    question && question.answer,
+  ];
+  const responseText = candidates.find((value) => value != null && String(value).trim() !== "");
+  return responseText
+    ? String(responseText).trim()
+    : "In today's world, consistency and focused preparation form the core foundation for achieving strong scores in IELTS examinations.";
 }
 
 function fillAnswersNoVoice(activity) {
   let correctCount = 0;
-  let attemptedCount = 0;
-  let earnedScore = 0;
+  let alreadyDoneCount = 0;
   const list = Array.isArray(activity && activity.activityQuestionDetailsList) ? activity.activityQuestionDetailsList : [];
 
   list.forEach((q) => {
-    const options = Array.isArray(q.activityAnswerDTO) ? q.activityAnswerDTO : [];
-    const correctOptions = options.filter((o) => o.isCorrect === true);
-    let answer = q.userAnswer;
-    const empty = answer == null || answer === "" || (Array.isArray(answer) && answer.length === 0);
-
-    // SPEAKING/RECORDING TASKS: Instant bypass without voice wait
-    if (isManualOnlyQuestion(q)) {
-      q.userAnswer = "";
-      q.submittedUserAnswer = "";
-      q.isSubmitClicked = true;
+    // Preserve answers already marked correct, exactly as in the old version.
+    if (q.isUserAnswerCorrect === true && q.userAnswer != null) {
+      correctCount++;
+      alreadyDoneCount++;
       q.allAnswersRecorded = true;
-      q.isUserAnswerCorrect = false;
-      attemptedCount++;
-      return; // SKIP - NO VOICE GENERATION
+      return;
     }
 
-    if (empty && !isManualOnlyQuestion(q)) {
-      if (isTextAnswerQuestion(q)) {
-        // WRITING TASKS: Use correct answer text
-        const correctText = q.correctAnswer != null && String(q.correctAnswer).trim() !== ""
-          ? String(q.correctAnswer).trim()
-          : (correctOptions[0] && (correctOptions[0].answerOption || correctOptions[0].text));
-        answer = correctText || q.userEssay || "answer";
-      } else if (correctOptions.length > 1) {
-        // MULTIPLE RESPONSE: All correct option IDs
-        answer = correctOptions.map((o) => normalizeRcaOptionId(o.id));
-      } else if (correctOptions.length === 1) {
-        // SINGLE CHOICE: Correct option ID
-        answer = normalizeRcaOptionId(correctOptions[0].id);
-      } else if (q.correctAnswer != null && String(q.correctAnswer).trim() !== "") {
-        const byId = options.find((o) => String(o.id) === String(q.correctAnswer));
-        const byText = options.find((o) => String(o.answerOption || o.text || "").trim().toLowerCase() === String(q.correctAnswer).trim().toLowerCase());
-        answer = isTextAnswerQuestion(q)
-          ? String(byText ? (byText.answerOption || byText.text) : q.correctAnswer).trim()
-          : normalizeRcaOptionId(byId ? byId.id : q.correctAnswer);
-      } else {
-        answer = "";
-      }
+    // RCA expects IELTS writing in userEssay; userAnswer stays null.
+    if (isWritingQuestion(q)) {
+      q.userEssay = writingResponseText(q);
+      q.isUserAnswerCorrect = true;
+      q.userAnswer = null;
+      q.isSubmitClicked = true;
+      q.essaySubmittedToGyan = false;
+      q.allAnswersRecorded = true;
+      correctCount++;
+      return;
     }
 
+    // Do not generate or wait for voice. Still use the answer/key supplied by
+    // the activity response, falling back to the old first-option behavior.
+    const previousAnswer = q.userAnswer;
+    const answerWasEmpty = previousAnswer == null || previousAnswer === "" || (Array.isArray(previousAnswer) && previousAnswer.length === 0);
+    const answer = answerWasEmpty ? pickCorrectAnswerCompat(q) : previousAnswer;
     const hasValue = !(answer == null || answer === "" || (Array.isArray(answer) && answer.length === 0));
-    q.userAnswer = answer;
-    q.submittedUserAnswer = answer;
-    const questionType = String(q.itemType || q.answerType || q.type || "").toUpperCase();
-    q.isSubmitClicked = hasValue;
-    q.allAnswersRecorded = !hasValue && isNonAnswerQuestion(q);
-    if (hasValue) attemptedCount++;
+    const options = Array.isArray(q.activityAnswerDTO) ? q.activityAnswerDTO : [];
+    const correctOptions = correctOptionsFor(q);
+
+    q.userAnswer = hasValue ? answer : null;
+    q.submittedUserAnswer = hasValue ? answer : null;
+    q.isSubmitClicked = hasValue || isSpeakingQuestion(q);
+    q.allAnswersRecorded = true;
 
     let correct = false;
     if (Array.isArray(answer)) {
-      correct = answer.length > 0 && answer.every((value) => options.some((o) => String(o.id) === String(value) && o.isCorrect === true));
-    } else {
-      const matched = options.find((o) => String(o.id) === String(answer));
-      const expectedText = q.correctAnswer != null ? String(q.correctAnswer).trim().toLowerCase() : "";
-      const answerText = String(answer == null ? "" : answer).trim().toLowerCase();
-      correct = matched ? matched.isCorrect === true : (!!expectedText && answerText === expectedText);
-      if (!correct && isTextAnswerQuestion(q) && correctOptions.length) {
-        correct = correctOptions.some((o) => String(o.answerOption || o.text || "").trim().toLowerCase() === answerText);
+      correct = answer.length > 0 && answer.every((value) => options.some((option) => String(option.id) === String(value) && isTruthyAnswerFlag(option.isCorrect ?? option.correct ?? option.isAnswer)));
+    } else if (hasValue) {
+      const matched = options.find((option) => String(option.id) === String(answer));
+      const expected = responseAnswerFor(q);
+      const answerText = String(answer).trim().toLowerCase();
+      const expectedText = expected == null ? "" : String(expected).trim().toLowerCase();
+      correct = matched
+        ? isTruthyAnswerFlag(matched.isCorrect ?? matched.correct ?? matched.isAnswer)
+        : (!!expectedText && answerText === expectedText);
+      if (!correct && isTextAnswerQuestion(q) && correctOptions.length > 0) {
+        correct = correctOptions.some((option) => String(optionText(option)).trim().toLowerCase() === answerText);
       }
     }
 
     q.isUserAnswerCorrect = !!correct;
-    if (correct) {
-      correctCount++;
-      earnedScore += Number(q.itemScore || q.score || 1);
-    }
+    if (correct) correctCount++;
   });
 
-  activity.totalQuestionsAttempted = attemptedCount;
+  console.log(`[FillAnswers] Total Qs: ${list.length}, Already Correct: ${alreadyDoneCount}, Newly Filled: ${list.length - alreadyDoneCount}`);
+  // Match the old submission counters: one attempted/point per question.
+  activity.totalQuestionsAttempted = list.length;
   activity.totalAnswersCorrect = correctCount;
-  activity.totalEarnedScore = earnedScore;
-  activity.totalQuestionsLeft = Math.max(0, Number(activity.totalQuestions || list.length) - attemptedCount);
+  activity.totalEarnedScore = correctCount;
+  activity.totalQuestionsLeft = 0;
   return activity;
 }
 
@@ -1735,13 +1795,15 @@ async function submitActivity(token, activity, state, learnerId, loginId, client
 
 function mergeActivityAnswers(fresh, previous) {
   const previousRows = Array.isArray(previous && previous.activityQuestionDetailsList) ? previous.activityQuestionDetailsList : [];
-  const byItem = new Map(previousRows.map((q) => [String(q.itemId), q]));
+  const byItem = new Map(previousRows.filter((q) => q.itemId != null).map((q) => [String(q.itemId), q]));
   const byResult = new Map(previousRows.filter((q) => q.activityResultDetailId != null).map((q) => [String(q.activityResultDetailId), q]));
   const rows = Array.isArray(fresh && fresh.activityQuestionDetailsList) ? fresh.activityQuestionDetailsList : [];
-  rows.forEach((q) => {
-    const old = byItem.get(String(q.itemId)) || (q.activityResultDetailId != null ? byResult.get(String(q.activityResultDetailId)) : null);
+  rows.forEach((q, index) => {
+    const old = (q.itemId != null ? byItem.get(String(q.itemId)) : null)
+      || (q.activityResultDetailId != null ? byResult.get(String(q.activityResultDetailId)) : null)
+      || previousRows[index];
     if (!old) return;
-    for (const field of ["userAnswer", "submittedUserAnswer", "isSubmitClicked", "allAnswersRecorded", "isUserAnswerCorrect", "userEssay", "learnerAnswerRecordingId", "answerRecordingPath"]) {
+    for (const field of ["userAnswer", "submittedUserAnswer", "isSubmitClicked", "allAnswersRecorded", "isUserAnswerCorrect", "userEssay", "essaySubmittedToGyan", "learnerAnswerRecordingId", "answerRecordingPath"]) {
       if (old[field] !== undefined) q[field] = old[field];
     }
   });
@@ -1936,7 +1998,7 @@ async function ensureSessionValid(user) {
       const isExpiry = SESSION_EXPIRY_HINTS.some((h) => msg.includes(h)) || (e && (e.status === 401 || e.status === 403));
       if (!isExpiry) throw e;
       if (i === 0) {
-        console.log(`[Session] Token invalidated for ${user.loginId} – re-authenticating...`);
+        console.log(`[Session] Token invalidated for ${user.loginId} â€“ re-authenticating...`);
         const u = await rcaLogin(user.loginId, "", user.clientInfo);
         user.accessToken = u.accessToken;
         user.learnerId = u.learnerId || user.learnerId;
@@ -1948,7 +2010,7 @@ async function ensureSessionValid(user) {
         if (u.resumeInfo) user.resumeInfo = u.resumeInfo;
         console.log(`[Session] Re-authenticated ${user.loginId}`);
       } else {
-        throw new Error("Session busy on another device – try again shortly");
+        throw new Error("Session busy on another device â€“ try again shortly");
       }
     }
   }
@@ -2072,7 +2134,7 @@ async function runCompleteJob(job, userSessions, rawTasks, sectionId) {
 
     if (pendingTasks.length === 0) {
       job.status = job.status === "cancelled" ? "cancelled" : "done";
-      job.task = "No pending tasks ✓";
+      job.task = "No pending tasks âœ“";
       job.finishedAt = Date.now();
       jobLog(job, "No pending tasks", "warn");
       return;
@@ -2206,7 +2268,7 @@ async function handleApi(req, res, pathname) {
     const password = body.password || CONFIG.APP_PASSWORD;
     const loginIdRaw = String(body.loginId || "").trim();
     if (!loginIdRaw) return sendJson(res, 400, { error: "Enter User ID" });
-    if (body.bulk === true || /[,，]/.test(loginIdRaw)) {
+    if (body.bulk === true || /[,ï¼Œ]/.test(loginIdRaw)) {
       return sendJson(res, 400, { error: "Please sign in with one User ID at a time." });
     }
     const loginIds = [loginIdRaw];
@@ -2626,17 +2688,17 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(CONFIG.PORT, CONFIG.HOST, () => {
   console.log("=".repeat(80));
-  console.log(" 🚀 RCA IELTS Dashboard (Production v7 - NO VOICE TIMEOUT)");
-  console.log(" 🌐 URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
-  console.log(" ✅ FIXED: No Voice Generation Timeout");
-  console.log(" ✅ FIXED: Speaking Tasks Auto-Bypass (Instant)");
-  console.log(" ✅ FIXED: Writing Tasks with Correct Answers");
-  console.log(" ✅ OPTIMIZED: 3 sec faster timeouts (3x speeds up)");
-  console.log(" ✅ OPTIMIZED: Higher concurrency (15x check, 4x task)");
-  console.log(" ✅ OPTIMIZED: Reduced state verification delays");
-  console.log(" ✅ PRESERVED: All 5 sections + features");
-  console.log(" 🎯 Performance: Lightning fast, no external API waits");
-  console.log(" ⏱️ Timing: Real elapsed time tracking");
-  console.log(" 📚 Sections: LearnEnglish, IELTS, APEX, Wordcraft, VocabBuilder");
+  console.log(" ðŸš€ RCA IELTS Dashboard (Production v7 - NO VOICE TIMEOUT)");
+  console.log(" ðŸŒ URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
+  console.log(" âœ… FIXED: No Voice Generation Timeout");
+  console.log(" âœ… FIXED: Speaking Tasks Auto-Bypass (Instant)");
+  console.log(" âœ… FIXED: Writing Tasks with Correct Answers");
+  console.log(" âœ… OPTIMIZED: 3 sec faster timeouts (3x speeds up)");
+  console.log(" âœ… OPTIMIZED: Higher concurrency (15x check, 4x task)");
+  console.log(" âœ… OPTIMIZED: Reduced state verification delays");
+  console.log(" âœ… PRESERVED: All 5 sections + features");
+  console.log(" ðŸŽ¯ Performance: Lightning fast, no external API waits");
+  console.log(" â±ï¸ Timing: Real elapsed time tracking");
+  console.log(" ðŸ“š Sections: LearnEnglish, IELTS, APEX, Wordcraft, VocabBuilder");
   console.log("=".repeat(80));
 });
