@@ -961,30 +961,6 @@ function fillAnswers(activity) {
 }
 
 // ==================== PER-QUESTION SUBMIT LOGIC ====================
-async function submitSingleQuestion(token, activity, questionIndex, state, learnerId, loginId, clientInfo, apiLogger) {
-  const payload = Object.assign({}, activity);
-  payload.activityState = state;
-  payload.learnerId = learnerId;
-  payload.activityType = payload.activityType || (String(payload.activityType || "").toUpperCase() === "FINAL" ? "Final" : "Lesson");
-
-  const now = Date.now();
-  if (!payload.startDate) payload.startDate = now - 15000;
-
-  if (state === "SUBMITTED") {
-    payload.endDate = now;
-    payload.totalTimeTaken = Math.max(15, Math.floor((payload.endDate - payload.startDate) / 1000));
-    payload.totalTimeTakenInSecs = payload.totalTimeTaken;
-    payload.totalQuestionsLeft = Math.max(0, (payload.totalQuestions || payload.activityQuestionDetailsList?.length || 0) - questionIndex - 1);
-    payload.isSubmitClicked = true;
-  } else {
-    // INPROGRESS state - update current question index
-    payload.currentQuestionIndex = questionIndex;
-    payload.isSubmitClicked = true;
-  }
-
-  await rcaRequest("POST", "/activity/data", { token, body: payload, loginId, clientInfo, apiLogger });
-  return payload;
-}
 
 async function submitActivity(token, activity, state, learnerId, loginId, clientInfo, apiLogger) {
   const payload = Object.assign({}, activity);
@@ -1353,65 +1329,63 @@ const SECTIONS = {
     },
 
     completeActivity: async (session, activitySetId, onLog, apiLogger) => {
-      const token = session.accessToken; const learnerId = session.learnerId; const loginId = session.loginId; const clientInfo = session.clientInfo;
+      const token = session.accessToken;
+      const learnerId = session.learnerId;
+      const loginId = session.loginId;
+      const clientInfo = session.clientInfo;
       const activityStartTime = Date.now();
+
       onLog && onLog("Fetching activity: " + activitySetId, "info");
 
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
-      if (isPersistedSubmitted(activity)) { onLog && onLog("Already completed: " + activitySetId, "warn"); return { skipped: true, activitySetId, reason: "already_completed" }; }
 
-      const allQuestions = activity.activityQuestionDetailsList || [];
-      onLog && onLog(`Starting ${allQuestions.length} questions with per-question submit...`, "info");
-
-      // Process each question individually
-      for (let i = 0; i < allQuestions.length; i++) {
-        const q = allQuestions[i];
-        const answerData = getAnswerForQuestion(q);
-        q.userAnswer = answerData.userAnswer; q.submittedUserAnswer = answerData.submittedUserAnswer;
-        q.isSubmitClicked = answerData.isSubmitClicked; q.allAnswersRecorded = answerData.allAnswersRecorded;
-        q.isUserAnswerCorrect = answerData.isUserAnswerCorrect;
-        if (answerData.learnerAnswerRecordingId) q.learnerAnswerRecordingId = answerData.learnerAnswerRecordingId;
-        if (answerData.answerRecordingPath) q.answerRecordingPath = answerData.answerRecordingPath;
-        if (answerData.userEssay) q.userEssay = answerData.userEssay;
-
-        let attemptedCount = 0; let correctCount = 0; let earnedScore = 0;
-        for (let j = 0; j <= i; j++) {
-          const qq = allQuestions[j];
-          const hasValue = !(qq.userAnswer == null || qq.userAnswer === "" || (Array.isArray(qq.userAnswer) && qq.userAnswer.length === 0));
-          if (hasValue) attemptedCount++;
-          if (qq.isUserAnswerCorrect) { correctCount++; earnedScore += Number(qq.itemScore || qq.score || 1); }
-        }
-        activity.totalQuestionsAttempted = attemptedCount; activity.totalAnswersCorrect = correctCount;
-        activity.totalEarnedScore = earnedScore; activity.totalQuestionsLeft = Math.max(0, allQuestions.length - attemptedCount);
-        activity.activityState = "INPROGRESS"; activity.learnerId = learnerId;
-        if (!activity.startDate) activity.startDate = activityStartTime - 15000;
-
-        // Submit after EACH question
-        const isLast = i === allQuestions.length - 1;
-        const state = isLast ? "SUBMITTED" : "INPROGRESS";
-        onLog && onLog(`Q${i+1}/${allQuestions.length}: ${isSpeakingQuestion(q) ? "SPEAKING (auto)" : isWritingQuestion(q) ? "WRITING (auto)" : "ANSWERED"} -> ${state}`, "info");
-
-        await submitSingleQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
-
-        if (!isLast && CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
+      if (isPersistedSubmitted(activity)) {
+        onLog && onLog("Already completed: " + activitySetId, "warn");
+        return { skipped: true, activitySetId, reason: "already_completed" };
       }
 
-      // Final verification
-      await sleep(CONFIG.FINAL_VERIFICATION_DELAY_MS);
+      const allQuestions = activity.activityQuestionDetailsList || [];
+      const speakingCount = allQuestions.filter(q => isSpeakingQuestion(q)).length;
+      const writingCount = allQuestions.filter(q => isWritingQuestion(q)).length;
+
+      onLog && onLog(`Activity has ${allQuestions.length} questions` + (speakingCount > 0 ? ` (${speakingCount} speaking auto)` : "") + (writingCount > 0 ? ` (${writingCount} writing auto)` : ""), "info");
+
+      // Fill ALL answers at once (includes speaking/writing auto-generation)
+      activity = fillAnswers(activity);
+      activity.activityState = "INPROGRESS";
+      activity.learnerId = learnerId;
+      activity.startDate = activityStartTime - 15000;
+
+      // Submit as IN PROGRESS (once for all questions)
+      onLog && onLog("Submitting as INPROGRESS: " + activitySetId, "info");
+      await submitActivityWithRecovery(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger, activitySetId);
+
+      await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
+
+      // Submit as SUBMITTED (once for all questions)
+      onLog && onLog("Submitting as SUBMITTED: " + activitySetId, "info");
+      activity = await submitActivityWithRecovery(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger, activitySetId);
+
+      await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
+
+      // VERIFY
       const verifyActivity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!isPersistedSubmitted(verifyActivity)) {
         onLog && onLog("State verification failed, retrying...", "warn");
         await sleep(200);
         const retryVerify = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
-        if (!isPersistedSubmitted(retryVerify)) throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
+        if (!isPersistedSubmitted(retryVerify)) {
+          throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
+        }
       }
 
       const actualTimeTaken = Math.max(20, Math.floor((Date.now() - activityStartTime) / 1000));
-      onLog && onLog(`Verified submitted: ${activitySetId} (${allQuestions.length} Qs, ${actualTimeTaken}s)`, "success");
+      onLog && onLog("Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs, " + actualTimeTaken + "s)", "success");
 
       const lessonId = activity.lessonId || activitySetId;
       await updateTimeTaken(token, learnerId, lessonId, activitySetId, actualTimeTaken, loginId, clientInfo, apiLogger, "Lesson");
+
       return { success: true, activitySetId, questionsCount: allQuestions.length, timeTaken: actualTimeTaken };
     }
   },
@@ -1455,32 +1429,63 @@ const SECTIONS = {
     },
 
     completeActivity: async (session, activitySetId, onLog, apiLogger) => {
-      const token = session.accessToken; const learnerId = session.learnerId; const loginId = session.loginId; const clientInfo = session.clientInfo;
+      const token = session.accessToken;
+      const learnerId = session.learnerId;
+      const loginId = session.loginId;
+      const clientInfo = session.clientInfo;
       const activityStartTime = Date.now();
+
       onLog && onLog("Fetching activity: " + activitySetId, "info");
+
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
-      if (isPersistedSubmitted(activity)) { onLog && onLog("Already completed: " + activitySetId, "warn"); return { skipped: true, activitySetId, reason: "already_completed" }; }
-      const allQuestions = activity.activityQuestionDetailsList || [];
-      onLog && onLog(`Starting ${allQuestions.length} questions with per-question submit...`, "info");
-      for (let i = 0; i < allQuestions.length; i++) {
-        const q = allQuestions[i]; const answerData = getAnswerForQuestion(q);
-        q.userAnswer = answerData.userAnswer; q.submittedUserAnswer = answerData.submittedUserAnswer; q.isSubmitClicked = answerData.isSubmitClicked; q.allAnswersRecorded = answerData.allAnswersRecorded; q.isUserAnswerCorrect = answerData.isUserAnswerCorrect;
-        if (answerData.learnerAnswerRecordingId) q.learnerAnswerRecordingId = answerData.learnerAnswerRecordingId; if (answerData.answerRecordingPath) q.answerRecordingPath = answerData.answerRecordingPath; if (answerData.userEssay) q.userEssay = answerData.userEssay;
-        let attemptedCount = 0; let correctCount = 0; let earnedScore = 0;
-        for (let j = 0; j <= i; j++) { const qq = allQuestions[j]; const hasValue = !(qq.userAnswer == null || qq.userAnswer === "" || (Array.isArray(qq.userAnswer) && qq.userAnswer.length === 0)); if (hasValue) attemptedCount++; if (qq.isUserAnswerCorrect) { correctCount++; earnedScore += Number(qq.itemScore || qq.score || 1); } }
-        activity.totalQuestionsAttempted = attemptedCount; activity.totalAnswersCorrect = correctCount; activity.totalEarnedScore = earnedScore; activity.totalQuestionsLeft = Math.max(0, allQuestions.length - attemptedCount); activity.activityState = "INPROGRESS"; activity.learnerId = learnerId; if (!activity.startDate) activity.startDate = activityStartTime - 15000;
-        const isLast = i === allQuestions.length - 1; const state = isLast ? "SUBMITTED" : "INPROGRESS";
-        onLog && onLog(`Q${i+1}/${allQuestions.length}: ${isSpeakingQuestion(q) ? "SPEAKING (auto)" : isWritingQuestion(q) ? "WRITING (auto)" : "ANSWERED"} -> ${state}`, "info");
-        await submitSingleQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
-        if (!isLast && CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
+
+      if (isPersistedSubmitted(activity)) {
+        onLog && onLog("Already completed: " + activitySetId, "warn");
+        return { skipped: true, activitySetId, reason: "already_completed" };
       }
-      await sleep(CONFIG.FINAL_VERIFICATION_DELAY_MS);
+
+      const allQuestions = activity.activityQuestionDetailsList || [];
+      const speakingCount = allQuestions.filter(q => isSpeakingQuestion(q)).length;
+      const writingCount = allQuestions.filter(q => isWritingQuestion(q)).length;
+
+      onLog && onLog(`Activity has ${allQuestions.length} questions` + (speakingCount > 0 ? ` (${speakingCount} speaking auto)` : "") + (writingCount > 0 ? ` (${writingCount} writing auto)` : ""), "info");
+
+      // Fill ALL answers at once (includes speaking/writing auto-generation)
+      activity = fillAnswers(activity);
+      activity.activityState = "INPROGRESS";
+      activity.learnerId = learnerId;
+      activity.startDate = activityStartTime - 15000;
+
+      // Submit as IN PROGRESS (once for all questions)
+      onLog && onLog("Submitting as INPROGRESS: " + activitySetId, "info");
+      await submitActivityWithRecovery(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger, activitySetId);
+
+      await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
+
+      // Submit as SUBMITTED (once for all questions)
+      onLog && onLog("Submitting as SUBMITTED: " + activitySetId, "info");
+      activity = await submitActivityWithRecovery(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger, activitySetId);
+
+      await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
+
+      // VERIFY
       const verifyActivity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
-      if (!isPersistedSubmitted(verifyActivity)) { onLog && onLog("State verification failed, retrying...", "warn"); await sleep(200); const retryVerify = await fetchActivityDetails(activitySetId, token, loginId, clientInfo); if (!isPersistedSubmitted(retryVerify)) throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`); }
+      if (!isPersistedSubmitted(verifyActivity)) {
+        onLog && onLog("State verification failed, retrying...", "warn");
+        await sleep(200);
+        const retryVerify = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
+        if (!isPersistedSubmitted(retryVerify)) {
+          throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
+        }
+      }
+
       const actualTimeTaken = Math.max(20, Math.floor((Date.now() - activityStartTime) / 1000));
-      onLog && onLog(`Verified submitted: ${activitySetId} (${allQuestions.length} Qs, ${actualTimeTaken}s)`, "success");
-      const lessonId = activity.lessonId || activitySetId; await updateTimeTaken(token, learnerId, lessonId, activitySetId, actualTimeTaken, loginId, clientInfo, apiLogger, "Lesson");
+      onLog && onLog("Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs, " + actualTimeTaken + "s)", "success");
+
+      const lessonId = activity.lessonId || activitySetId;
+      await updateTimeTaken(token, learnerId, lessonId, activitySetId, actualTimeTaken, loginId, clientInfo, apiLogger, "Lesson");
+
       return { success: true, activitySetId, questionsCount: allQuestions.length, timeTaken: actualTimeTaken };
     }
   },
@@ -1524,32 +1529,63 @@ const SECTIONS = {
     },
 
     completeActivity: async (session, activitySetId, onLog, apiLogger) => {
-      const token = session.accessToken; const learnerId = session.learnerId; const loginId = session.loginId; const clientInfo = session.clientInfo;
+      const token = session.accessToken;
+      const learnerId = session.learnerId;
+      const loginId = session.loginId;
+      const clientInfo = session.clientInfo;
       const activityStartTime = Date.now();
+
       onLog && onLog("Fetching activity: " + activitySetId, "info");
+
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
-      if (isPersistedSubmitted(activity)) { onLog && onLog("Already completed: " + activitySetId, "warn"); return { skipped: true, activitySetId, reason: "already_completed" }; }
-      const allQuestions = activity.activityQuestionDetailsList || [];
-      onLog && onLog(`Starting ${allQuestions.length} questions with per-question submit...`, "info");
-      for (let i = 0; i < allQuestions.length; i++) {
-        const q = allQuestions[i]; const answerData = getAnswerForQuestion(q);
-        q.userAnswer = answerData.userAnswer; q.submittedUserAnswer = answerData.submittedUserAnswer; q.isSubmitClicked = answerData.isSubmitClicked; q.allAnswersRecorded = answerData.allAnswersRecorded; q.isUserAnswerCorrect = answerData.isUserAnswerCorrect;
-        if (answerData.learnerAnswerRecordingId) q.learnerAnswerRecordingId = answerData.learnerAnswerRecordingId; if (answerData.answerRecordingPath) q.answerRecordingPath = answerData.answerRecordingPath; if (answerData.userEssay) q.userEssay = answerData.userEssay;
-        let attemptedCount = 0; let correctCount = 0; let earnedScore = 0;
-        for (let j = 0; j <= i; j++) { const qq = allQuestions[j]; const hasValue = !(qq.userAnswer == null || qq.userAnswer === "" || (Array.isArray(qq.userAnswer) && qq.userAnswer.length === 0)); if (hasValue) attemptedCount++; if (qq.isUserAnswerCorrect) { correctCount++; earnedScore += Number(qq.itemScore || qq.score || 1); } }
-        activity.totalQuestionsAttempted = attemptedCount; activity.totalAnswersCorrect = correctCount; activity.totalEarnedScore = earnedScore; activity.totalQuestionsLeft = Math.max(0, allQuestions.length - attemptedCount); activity.activityState = "INPROGRESS"; activity.learnerId = learnerId; if (!activity.startDate) activity.startDate = activityStartTime - 15000;
-        const isLast = i === allQuestions.length - 1; const state = isLast ? "SUBMITTED" : "INPROGRESS";
-        onLog && onLog(`Q${i+1}/${allQuestions.length}: ${isSpeakingQuestion(q) ? "SPEAKING (auto)" : isWritingQuestion(q) ? "WRITING (auto)" : "ANSWERED"} -> ${state}`, "info");
-        await submitSingleQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
-        if (!isLast && CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
+
+      if (isPersistedSubmitted(activity)) {
+        onLog && onLog("Already completed: " + activitySetId, "warn");
+        return { skipped: true, activitySetId, reason: "already_completed" };
       }
-      await sleep(CONFIG.FINAL_VERIFICATION_DELAY_MS);
+
+      const allQuestions = activity.activityQuestionDetailsList || [];
+      const speakingCount = allQuestions.filter(q => isSpeakingQuestion(q)).length;
+      const writingCount = allQuestions.filter(q => isWritingQuestion(q)).length;
+
+      onLog && onLog(`Activity has ${allQuestions.length} questions` + (speakingCount > 0 ? ` (${speakingCount} speaking auto)` : "") + (writingCount > 0 ? ` (${writingCount} writing auto)` : ""), "info");
+
+      // Fill ALL answers at once (includes speaking/writing auto-generation)
+      activity = fillAnswers(activity);
+      activity.activityState = "INPROGRESS";
+      activity.learnerId = learnerId;
+      activity.startDate = activityStartTime - 15000;
+
+      // Submit as IN PROGRESS (once for all questions)
+      onLog && onLog("Submitting as INPROGRESS: " + activitySetId, "info");
+      await submitActivityWithRecovery(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger, activitySetId);
+
+      await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
+
+      // Submit as SUBMITTED (once for all questions)
+      onLog && onLog("Submitting as SUBMITTED: " + activitySetId, "info");
+      activity = await submitActivityWithRecovery(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger, activitySetId);
+
+      await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
+
+      // VERIFY
       const verifyActivity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
-      if (!isPersistedSubmitted(verifyActivity)) { onLog && onLog("State verification failed, retrying...", "warn"); await sleep(200); const retryVerify = await fetchActivityDetails(activitySetId, token, loginId, clientInfo); if (!isPersistedSubmitted(retryVerify)) throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`); }
+      if (!isPersistedSubmitted(verifyActivity)) {
+        onLog && onLog("State verification failed, retrying...", "warn");
+        await sleep(200);
+        const retryVerify = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
+        if (!isPersistedSubmitted(retryVerify)) {
+          throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
+        }
+      }
+
       const actualTimeTaken = Math.max(20, Math.floor((Date.now() - activityStartTime) / 1000));
-      onLog && onLog(`Verified submitted: ${activitySetId} (${allQuestions.length} Qs, ${actualTimeTaken}s)`, "success");
-      const lessonId = activity.lessonId || activitySetId; await updateTimeTaken(token, learnerId, lessonId, activitySetId, actualTimeTaken, loginId, clientInfo, apiLogger, "Lesson");
+      onLog && onLog("Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs, " + actualTimeTaken + "s)", "success");
+
+      const lessonId = activity.lessonId || activitySetId;
+      await updateTimeTaken(token, learnerId, lessonId, activitySetId, actualTimeTaken, loginId, clientInfo, apiLogger, "Lesson");
+
       return { success: true, activitySetId, questionsCount: allQuestions.length, timeTaken: actualTimeTaken };
     }
   },
@@ -1593,32 +1629,63 @@ const SECTIONS = {
     },
 
     completeActivity: async (session, activitySetId, onLog, apiLogger) => {
-      const token = session.accessToken; const learnerId = session.learnerId; const loginId = session.loginId; const clientInfo = session.clientInfo;
+      const token = session.accessToken;
+      const learnerId = session.learnerId;
+      const loginId = session.loginId;
+      const clientInfo = session.clientInfo;
       const activityStartTime = Date.now();
+
       onLog && onLog("Fetching activity: " + activitySetId, "info");
+
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
-      if (isPersistedSubmitted(activity)) { onLog && onLog("Already completed: " + activitySetId, "warn"); return { skipped: true, activitySetId, reason: "already_completed" }; }
-      const allQuestions = activity.activityQuestionDetailsList || [];
-      onLog && onLog(`Starting ${allQuestions.length} questions with per-question submit...`, "info");
-      for (let i = 0; i < allQuestions.length; i++) {
-        const q = allQuestions[i]; const answerData = getAnswerForQuestion(q);
-        q.userAnswer = answerData.userAnswer; q.submittedUserAnswer = answerData.submittedUserAnswer; q.isSubmitClicked = answerData.isSubmitClicked; q.allAnswersRecorded = answerData.allAnswersRecorded; q.isUserAnswerCorrect = answerData.isUserAnswerCorrect;
-        if (answerData.learnerAnswerRecordingId) q.learnerAnswerRecordingId = answerData.learnerAnswerRecordingId; if (answerData.answerRecordingPath) q.answerRecordingPath = answerData.answerRecordingPath; if (answerData.userEssay) q.userEssay = answerData.userEssay;
-        let attemptedCount = 0; let correctCount = 0; let earnedScore = 0;
-        for (let j = 0; j <= i; j++) { const qq = allQuestions[j]; const hasValue = !(qq.userAnswer == null || qq.userAnswer === "" || (Array.isArray(qq.userAnswer) && qq.userAnswer.length === 0)); if (hasValue) attemptedCount++; if (qq.isUserAnswerCorrect) { correctCount++; earnedScore += Number(qq.itemScore || qq.score || 1); } }
-        activity.totalQuestionsAttempted = attemptedCount; activity.totalAnswersCorrect = correctCount; activity.totalEarnedScore = earnedScore; activity.totalQuestionsLeft = Math.max(0, allQuestions.length - attemptedCount); activity.activityState = "INPROGRESS"; activity.learnerId = learnerId; if (!activity.startDate) activity.startDate = activityStartTime - 15000;
-        const isLast = i === allQuestions.length - 1; const state = isLast ? "SUBMITTED" : "INPROGRESS";
-        onLog && onLog(`Q${i+1}/${allQuestions.length}: ${isSpeakingQuestion(q) ? "SPEAKING (auto)" : isWritingQuestion(q) ? "WRITING (auto)" : "ANSWERED"} -> ${state}`, "info");
-        await submitSingleQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
-        if (!isLast && CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
+
+      if (isPersistedSubmitted(activity)) {
+        onLog && onLog("Already completed: " + activitySetId, "warn");
+        return { skipped: true, activitySetId, reason: "already_completed" };
       }
-      await sleep(CONFIG.FINAL_VERIFICATION_DELAY_MS);
+
+      const allQuestions = activity.activityQuestionDetailsList || [];
+      const speakingCount = allQuestions.filter(q => isSpeakingQuestion(q)).length;
+      const writingCount = allQuestions.filter(q => isWritingQuestion(q)).length;
+
+      onLog && onLog(`Activity has ${allQuestions.length} questions` + (speakingCount > 0 ? ` (${speakingCount} speaking auto)` : "") + (writingCount > 0 ? ` (${writingCount} writing auto)` : ""), "info");
+
+      // Fill ALL answers at once (includes speaking/writing auto-generation)
+      activity = fillAnswers(activity);
+      activity.activityState = "INPROGRESS";
+      activity.learnerId = learnerId;
+      activity.startDate = activityStartTime - 15000;
+
+      // Submit as IN PROGRESS (once for all questions)
+      onLog && onLog("Submitting as INPROGRESS: " + activitySetId, "info");
+      await submitActivityWithRecovery(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger, activitySetId);
+
+      await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
+
+      // Submit as SUBMITTED (once for all questions)
+      onLog && onLog("Submitting as SUBMITTED: " + activitySetId, "info");
+      activity = await submitActivityWithRecovery(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger, activitySetId);
+
+      await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
+
+      // VERIFY
       const verifyActivity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
-      if (!isPersistedSubmitted(verifyActivity)) { onLog && onLog("State verification failed, retrying...", "warn"); await sleep(200); const retryVerify = await fetchActivityDetails(activitySetId, token, loginId, clientInfo); if (!isPersistedSubmitted(retryVerify)) throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`); }
+      if (!isPersistedSubmitted(verifyActivity)) {
+        onLog && onLog("State verification failed, retrying...", "warn");
+        await sleep(200);
+        const retryVerify = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
+        if (!isPersistedSubmitted(retryVerify)) {
+          throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
+        }
+      }
+
       const actualTimeTaken = Math.max(20, Math.floor((Date.now() - activityStartTime) / 1000));
-      onLog && onLog(`Verified submitted: ${activitySetId} (${allQuestions.length} Qs, ${actualTimeTaken}s)`, "success");
-      const lessonId = activity.lessonId || activitySetId; await updateTimeTaken(token, learnerId, lessonId, activitySetId, actualTimeTaken, loginId, clientInfo, apiLogger, "Lesson");
+      onLog && onLog("Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs, " + actualTimeTaken + "s)", "success");
+
+      const lessonId = activity.lessonId || activitySetId;
+      await updateTimeTaken(token, learnerId, lessonId, activitySetId, actualTimeTaken, loginId, clientInfo, apiLogger, "Lesson");
+
       return { success: true, activitySetId, questionsCount: allQuestions.length, timeTaken: actualTimeTaken };
     }
   },
@@ -1646,32 +1713,63 @@ const SECTIONS = {
     },
 
     completeActivity: async (session, activitySetId, onLog, apiLogger) => {
-      const token = session.accessToken; const learnerId = session.learnerId; const loginId = session.loginId; const clientInfo = session.clientInfo;
+      const token = session.accessToken;
+      const learnerId = session.learnerId;
+      const loginId = session.loginId;
+      const clientInfo = session.clientInfo;
       const activityStartTime = Date.now();
-      onLog && onLog("Fetching IELTS activity: " + activitySetId, "info");
+
+      onLog && onLog("Fetching activity: " + activitySetId, "info");
+
       let activity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!activity) throw new Error("Null activity payload");
-      if (isPersistedSubmitted(activity)) { onLog && onLog("Already completed: " + activitySetId, "warn"); return { skipped: true, activitySetId, reason: "already_completed" }; }
-      const allQuestions = activity.activityQuestionDetailsList || [];
-      onLog && onLog(`Starting ${allQuestions.length} IELTS questions with per-question submit...`, "info");
-      for (let i = 0; i < allQuestions.length; i++) {
-        const q = allQuestions[i]; const answerData = getAnswerForQuestion(q);
-        q.userAnswer = answerData.userAnswer; q.submittedUserAnswer = answerData.submittedUserAnswer; q.isSubmitClicked = answerData.isSubmitClicked; q.allAnswersRecorded = answerData.allAnswersRecorded; q.isUserAnswerCorrect = answerData.isUserAnswerCorrect;
-        if (answerData.learnerAnswerRecordingId) q.learnerAnswerRecordingId = answerData.learnerAnswerRecordingId; if (answerData.answerRecordingPath) q.answerRecordingPath = answerData.answerRecordingPath; if (answerData.userEssay) q.userEssay = answerData.userEssay;
-        let attemptedCount = 0; let correctCount = 0; let earnedScore = 0;
-        for (let j = 0; j <= i; j++) { const qq = allQuestions[j]; const hasValue = !(qq.userAnswer == null || qq.userAnswer === "" || (Array.isArray(qq.userAnswer) && qq.userAnswer.length === 0)); if (hasValue) attemptedCount++; if (qq.isUserAnswerCorrect) { correctCount++; earnedScore += Number(qq.itemScore || qq.score || 1); } }
-        activity.totalQuestionsAttempted = attemptedCount; activity.totalAnswersCorrect = correctCount; activity.totalEarnedScore = earnedScore; activity.totalQuestionsLeft = Math.max(0, allQuestions.length - attemptedCount); activity.activityState = "INPROGRESS"; activity.learnerId = learnerId; if (!activity.startDate) activity.startDate = activityStartTime - 15000;
-        const isLast = i === allQuestions.length - 1; const state = isLast ? "SUBMITTED" : "INPROGRESS";
-        onLog && onLog(`Q${i+1}/${allQuestions.length}: ${isSpeakingQuestion(q) ? "SPEAKING (auto)" : isWritingQuestion(q) ? "WRITING (auto)" : "ANSWERED"} -> ${state}`, "info");
-        await submitSingleQuestion(token, activity, i, state, learnerId, loginId, clientInfo, apiLogger);
-        if (!isLast && CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
+
+      if (isPersistedSubmitted(activity)) {
+        onLog && onLog("Already completed: " + activitySetId, "warn");
+        return { skipped: true, activitySetId, reason: "already_completed" };
       }
-      await sleep(CONFIG.FINAL_VERIFICATION_DELAY_MS);
+
+      const allQuestions = activity.activityQuestionDetailsList || [];
+      const speakingCount = allQuestions.filter(q => isSpeakingQuestion(q)).length;
+      const writingCount = allQuestions.filter(q => isWritingQuestion(q)).length;
+
+      onLog && onLog(`Activity has ${allQuestions.length} questions` + (speakingCount > 0 ? ` (${speakingCount} speaking auto)` : "") + (writingCount > 0 ? ` (${writingCount} writing auto)` : ""), "info");
+
+      // Fill ALL answers at once (includes speaking/writing auto-generation)
+      activity = fillAnswers(activity);
+      activity.activityState = "INPROGRESS";
+      activity.learnerId = learnerId;
+      activity.startDate = activityStartTime - 15000;
+
+      // Submit as IN PROGRESS (once for all questions)
+      onLog && onLog("Submitting as INPROGRESS: " + activitySetId, "info");
+      await submitActivityWithRecovery(token, activity, "INPROGRESS", learnerId, loginId, clientInfo, apiLogger, activitySetId);
+
+      await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
+
+      // Submit as SUBMITTED (once for all questions)
+      onLog && onLog("Submitting as SUBMITTED: " + activitySetId, "info");
+      activity = await submitActivityWithRecovery(token, activity, "SUBMITTED", learnerId, loginId, clientInfo, apiLogger, activitySetId);
+
+      await sleep(CONFIG.STATE_VERIFICATION_DELAY_MS);
+
+      // VERIFY
       const verifyActivity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
-      if (!isPersistedSubmitted(verifyActivity)) { onLog && onLog("State verification failed, retrying...", "warn"); await sleep(200); const retryVerify = await fetchActivityDetails(activitySetId, token, loginId, clientInfo); if (!isPersistedSubmitted(retryVerify)) throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`); }
+      if (!isPersistedSubmitted(verifyActivity)) {
+        onLog && onLog("State verification failed, retrying...", "warn");
+        await sleep(200);
+        const retryVerify = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
+        if (!isPersistedSubmitted(retryVerify)) {
+          throw new Error(`RCA did not persist SUBMITTED state for activity ${activitySetId}`);
+        }
+      }
+
       const actualTimeTaken = Math.max(20, Math.floor((Date.now() - activityStartTime) / 1000));
-      onLog && onLog(`Verified submitted: ${activitySetId} (${allQuestions.length} Qs, ${actualTimeTaken}s)`, "success");
-      const lessonId = activity.lessonId || activitySetId; await updateTimeTaken(token, learnerId, lessonId, activitySetId, actualTimeTaken, loginId, clientInfo, apiLogger, "Ielts");
+      onLog && onLog("Verified submitted: " + activitySetId + " (" + allQuestions.length + " Qs, " + actualTimeTaken + "s)", "success");
+
+      const lessonId = activity.lessonId || activitySetId;
+      await updateTimeTaken(token, learnerId, lessonId, activitySetId, actualTimeTaken, loginId, clientInfo, apiLogger, "Lesson");
+
       return { success: true, activitySetId, questionsCount: allQuestions.length, timeTaken: actualTimeTaken };
     }
   },
@@ -1944,3 +2042,4 @@ server.listen(CONFIG.PORT, CONFIG.HOST, () => {
   console.log(" NEW: Speed optimized - reduced delays, higher concurrency");
   console.log("=".repeat(70));
 });
+
