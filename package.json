@@ -1,14 +1,22 @@
 {
   "name": "rca-ielts-dashboard",
-  "version": "2.0.0",
-  "description": "Secure IELTS dashboard – RCA logic on Node backend",
+  "version": "6.0.0",
+  "description": "RCA IELTS Dashboard - Production Edition (Speaking Auto + Writing Auto + Per-Question Submit)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "server": "node server.js"
+    "dev": "node server.js"
   },
   "engines": {
-    "node": ">=14"
+    "node": ">=18.0.0"
   },
-  "private": true
+  "keywords": [
+    "rca",
+    "ielts",
+    "dashboard",
+    "automation"
+  ],
+  "author": "Ankit",
+  "license": "MIT",
+  "dependencies": {}
 }
