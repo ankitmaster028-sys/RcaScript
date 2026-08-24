@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * RCA IELTS Dashboard â€“ Production Edition (FIXED v6 - SPEAKING AUTO + WRITING AUTO + PER-QUESTION SUBMIT)
+ * RCA IELTS Dashboard – Production Edition (FIXED v6 - SPEAKING AUTO + WRITING AUTO + PER-QUESTION SUBMIT)
  * âœ… Speaking Tasks - AUTO (fake voice data generated)
  * âœ… Writing/Paragraph Tasks - AUTO (random paragraphs generated)
  * âœ… Per-Question Submit - Each question answered & submitted individually
  * âœ… Correct Timing - Actual time spent tracked and posted
  * âœ… Speed Optimized - Reduced delays, parallel processing where possible
+ * âœ… Vercel Compatible - Works on serverless + local
  */
 
 "use strict";
@@ -621,8 +622,6 @@ function getQuestionType(question) {
   if (/ESSAY|PARAGRAPH|WRITING|LONG.?ANSWER|DESCRIPTIVE|EMAIL|LETTER|REPORT|SUMMARY/.test(type)) return "WRITING";
   if (/SPEAK|PRONUNCIATION|RECORD|LISTENING_RECORD|VOICE|AUDIO|MIC/.test(type)) return "SPEAKING";
 
-  // Some RCA responses use a generic SELECT label. Use the answer shape to
-  // distinguish a single-select ID from a select-all list.
   if (/SELECT/.test(type)) {
     if (looksLikeDelimited(correctAnswer, "|||") || correctOptions.length > 1) return "MRQ";
     return "MCQ";
@@ -852,17 +851,14 @@ function getRandomEssay() {
 function getWritingAnswer(question) {
   const prompt = String(question.questionText || question.itemText || question.text || "").toLowerCase();
 
-  // Check word count requirement
   let wordCount = 150;
   const wordMatch = prompt.match(/(\d+)\s*words?/);
   if (wordMatch) wordCount = parseInt(wordMatch[1], 10);
 
-  // Determine type based on prompt
   if (prompt.includes("essay") || prompt.includes("discuss") || prompt.includes("opinion") || prompt.includes("agree") || prompt.includes("disagree")) {
     return getRandomEssay();
   }
 
-  // Generate multiple paragraphs for longer requirements
   let result = "";
   const targetWords = Math.max(80, wordCount);
   let currentWords = 0;
@@ -878,7 +874,6 @@ function getWritingAnswer(question) {
 
 // ==================== FAKE VOICE DATA FOR SPEAKING ====================
 function generateFakeVoiceData(question) {
-  // Generate a fake base64 audio string (short silent/placeholder audio)
   const fakeAudioBases = [
     "//uQxAAAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
     "//uQxAAAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
@@ -989,10 +984,8 @@ function getAnswerForQuestion(q) {
     answer = canonicalSequence(q);
     metaData = answer || q.metaData;
   } else if (type === "MRQ") {
-    // RCA's multi-select contract is a |||-delimited string, not a JSON array.
     answer = canonicalIdList(q);
   } else if (type === "MFIB") {
-    // Multi-fill answers are ordered text tokens separated by |||.
     answer = canonicalTextList(q);
   } else if (type === "FIB") {
     const correct = nonEmptyString(q.correctAnswer);
@@ -1491,7 +1484,6 @@ const SECTIONS = {
       const allQuestions = activity.activityQuestionDetailsList || [];
       onLog && onLog(`Starting ${allQuestions.length} questions with per-question submit...`, "info");
 
-      // Process each question individually
       for (let i = 0; i < allQuestions.length; i++) {
         const q = allQuestions[i];
         applyAnswerData(q, getAnswerForQuestion(q));
@@ -1508,7 +1500,6 @@ const SECTIONS = {
         activity.activityState = "INPROGRESS"; activity.learnerId = learnerId;
         if (!activity.startDate) activity.startDate = activityStartTime - 15000;
 
-        // Submit after EACH question
         const isLast = i === allQuestions.length - 1;
         const state = isLast ? "SUBMITTED" : "INPROGRESS";
         onLog && onLog(`Q${i+1}/${allQuestions.length}: ${isSpeakingQuestion(q) ? "SPEAKING (auto)" : isWritingQuestion(q) ? "WRITING (auto)" : "ANSWERED"} -> ${state}`, "info");
@@ -1518,7 +1509,6 @@ const SECTIONS = {
         if (!isLast && CONFIG.DELAY_BETWEEN_QUESTIONS_MS > 0) await sleep(CONFIG.DELAY_BETWEEN_QUESTIONS_MS);
       }
 
-      // Final verification
       await sleep(CONFIG.FINAL_VERIFICATION_DELAY_MS);
       const verifyActivity = await fetchActivityDetails(activitySetId, token, loginId, clientInfo);
       if (!isPersistedSubmitted(verifyActivity)) {
@@ -2055,42 +2045,42 @@ async function handleApi(req, res, pathname) {
   sendJson(res, 404, { error: "Not Found" });
 }
 
-// ==================== SERVER ====================
-const server = http.createServer(async (req, res) => {
+// ==================== EXPORT HANDLER FOR VERCEL ====================
+module.exports = async (req, res) => {
   try {
-    const u = new URL(req.url || "/", "http://" + CONFIG.HOST);
+    const u = new URL(req.url || "/", "http://" + (req.headers.host || "localhost"));
     if (u.pathname.startsWith("/api/")) { await handleApi(req, res, u.pathname); return; }
     if (u.pathname === "/password") { await handleApi(req, res, u.pathname); return; }
     serveStatic(req, res, u.pathname);
   } catch (err) { if (!res.headersSent) sendJson(res, 500, { error: String(err.message || err) }); }
-});
-
-server.listen(CONFIG.PORT, CONFIG.HOST, () => {
-  console.log("=".repeat(70));
-  console.log(" RCA IELTS Dashboard (Production v6 - SPEAKING AUTO + WRITING AUTO)");
-  console.log(" URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
-  console.log(" Session: 24h TTL + Auto-Refresh");
-  console.log(" Connection: Keep-Alive + Smart Retry + State Sync");
-  console.log(" Sections: LearnEnglish + IELTS + APEX + Wordcraft + Vocab Builder");
-  console.log(" NEW: Speaking tasks auto-completed with fake voice data");
-  console.log(" NEW: Writing tasks auto-completed with random paragraphs");
-  console.log(" NEW: Per-question submit (not all at once)");
-  console.log(" NEW: Correct timing - actual time spent posted");
-  console.log(" NEW: Speed optimized - reduced delays, higher concurrency");
-  console.log("=".repeat(70));
-});
-
-
-// Pure helpers are exported for contract tests; the server still starts normally when run directly.
-module.exports = {
-  getQuestionType,
-  getAnswerForQuestion,
-  applyAnswerData,
-  buildActivitySubmissionPayload,
-  isAnswerCorrectForQuestion,
-  canonicalIdList,
-  canonicalTextList,
-  canonicalSequence,
 };
 
+// ==================== LOCAL SERVER (NON-VERCEL) ====================
+const isVercel = !!process.env.VERCEL;
+if (!isVercel && require.main === module) {
+  const server = http.createServer(module.exports);
+  server.listen(CONFIG.PORT, CONFIG.HOST, () => {
+    console.log("=".repeat(70));
+    console.log(" RCA IELTS Dashboard (Production v6 - VERCEL FIXED)");
+    console.log(" URL: http://%s:%d", CONFIG.HOST, CONFIG.PORT);
+    console.log(" Session: 24h TTL + Auto-Refresh");
+    console.log(" Connection: Keep-Alive + Smart Retry + State Sync");
+    console.log(" Sections: LearnEnglish + IELTS + APEX + Wordcraft + Vocab Builder");
+    console.log(" âœ… Speaking tasks auto-completed with fake voice data");
+    console.log(" âœ… Writing tasks auto-completed with random paragraphs");
+    console.log(" âœ… Per-question submit (not all at once)");
+    console.log(" âœ… Correct timing - actual time spent posted");
+    console.log(" âœ… Vercel Compatible - Works locally + serverless");
+    console.log("=".repeat(70));
+  });
+}
 
+// ==================== EXPORT FOR TESTING ====================
+module.exports.getQuestionType = getQuestionType;
+module.exports.getAnswerForQuestion = getAnswerForQuestion;
+module.exports.applyAnswerData = applyAnswerData;
+module.exports.buildActivitySubmissionPayload = buildActivitySubmissionPayload;
+module.exports.isAnswerCorrectForQuestion = isAnswerCorrectForQuestion;
+module.exports.canonicalIdList = canonicalIdList;
+module.exports.canonicalTextList = canonicalTextList;
+module.exports.canonicalSequence = canonicalSequence;
