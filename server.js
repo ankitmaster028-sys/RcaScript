@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * RCA IELTS Dashboard – Production Edition (FIXED v6 - SPEAKING AUTO + WRITING AUTO + PER-QUESTION SUBMIT)
+ * RCA IELTS Dashboard – Production Edition (FIXED v7 - API RESPONSE UNWRAPPING + SPEAKING AUTO + WRITING AUTO + PER-QUESTION SUBMIT)
+ * âœ… Fixed Login - Unwraps RCA API {success, message, data} wrapper format automatically
  * âœ… Speaking Tasks - AUTO (fake voice data generated)
  * âœ… Writing/Paragraph Tasks - AUTO (random paragraphs generated)
  * âœ… Per-Question Submit - Each question answered & submitted individually
@@ -321,27 +322,42 @@ function executeRequest(opts, payload, attempt = 1, isLogin = false, apiLogger =
       res.on("end", () => {
         const raw = Buffer.concat(chunks).toString("utf8");
         let data = raw;
-        try { data = raw ? JSON.parse(raw) : null; } catch (_) {}
+        let unwrapped = raw;
+        let isWrapped = false;
+        try {
+          data = raw ? JSON.parse(raw) : null;
+          unwrapped = data;
+          if (data && typeof data === "object" && data !== null && "success" in data && "data" in data) {
+            isWrapped = true;
+            if (data.success === false && data.message) {
+              const error = new Error(data.message);
+              error.status = res.statusCode || 500;
+              error.data = data.data;
+              return retryOrReject(error);
+            }
+            unwrapped = data.data;
+          }
+        } catch (_) {}
         if (apiLogger) {
-          const dataStr = data != null ? (typeof data === "object" ? JSON.stringify(data).slice(0, 2000) : String(data).slice(0, 2000)) : null;
+          const dataStr = unwrapped != null ? (typeof unwrapped === "object" ? JSON.stringify(unwrapped).slice(0, 2000) : String(unwrapped).slice(0, 2000)) : null;
           apiLogger({ type: "response", method: requestOpts.method, path: requestOpts.path, status: res.statusCode, data: dataStr, timestamp: Date.now() });
         }
-        const message = String(data && (data.message || data.error) || raw || `HTTP ${res.statusCode}`);
+        const message = String((isWrapped && (data.message || data.error)) || raw || `HTTP ${res.statusCode}`);
         if (res.statusCode >= 400) {
           const error = new Error(message);
           error.status = res.statusCode;
-          error.data = data;
+          error.data = unwrapped;
           return retryOrReject(error);
         }
         const genericFailure = /something went wrong|try again later|temporarily unavailable|internal server error/.test(message.toLowerCase())
-          && !(data && (data.success === true || data.ok === true));
+          && !(isWrapped && data.success === true);
         if (genericFailure) {
           const error = new Error(message);
           error.status = 503;
-          error.data = data;
+          error.data = unwrapped;
           return retryOrReject(error);
         }
-        resolve(data);
+        resolve(unwrapped);
       });
     });
 
